@@ -1,0 +1,25 @@
+{
+  "cases": {
+    "seed_corpus": 152475.264,
+    "scan_intraday": 580789.948,
+    "downsample_to_days": 439809.185,
+    "plugin_resting_trend": 6.387,
+    "discover_plugins": 0.911
+  },
+  "units": {
+    "seed_corpus": "rows/sec",
+    "scan_intraday": "points/sec",
+    "downsample_to_days": "points/sec",
+    "plugin_resting_trend": "ms",
+    "discover_plugins": "ms"
+  },
+  "direction": {
+    "seed_corpus": "higher",
+    "scan_intraday": "higher",
+    "downsample_to_days": "higher",
+    "plugin_resting_trend": "lower",
+    "discover_plugins": "lower"
+  },
+  "recorded_utc": "2026-11-22T12:58:17+00:00",
+  "days": 90
+}

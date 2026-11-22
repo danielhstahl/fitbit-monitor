@@ -1,0 +1,26 @@
+.transcripts/
+.fathom/*
+!.fathom/reviews/
+!.fathom/ratchet.toml
+!.fathom/LAYOUT.md
+.fathom/**/*.tmp
+.fathom/**/*.sqlite3-*
+.pi/*
+mact.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+benchmark-results.json
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
