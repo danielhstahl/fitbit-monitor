@@ -15,6 +15,12 @@ anywhere except the alert webhook you configure - see
 > plugin. `fm dev seed` still writes a deterministic sample corpus, so every
 > command below works before you have connected an account - and that corpus is
 > synthetic data about nobody, never real health data and never sent anywhere.
+>
+> Data source: the **Google Health API** (`https://health.googleapis.com/v4`), decided
+> and dated in [ADR-0002](docs/adr/0002-health-api-source.md), with a Google Takeout
+> archive as an equal first-class source (`fm import --source csv`). The legacy Fitbit
+> Web API that the client code still targets was turned off on 2026-11-02 and returns no
+> data; that ADR's section 10 is the port.
 
 ## Quickstart
 
@@ -111,6 +117,11 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
 * [docs/adr/0001-implementation-stack.md](docs/adr/0001-implementation-stack.md) - the
   stack, once: Python floor, uv, `src/` layout, SQLite, the test/coverage/benchmark
   tools, and why the CLI is argparse.
+* [docs/adr/0002-health-api-source.md](docs/adr/0002-health-api-source.md) - where the
+  data comes from: the **Google Health API** (`health.googleapis.com/v4`) and a Takeout
+  archive as two first-class sources - and the record that the legacy Fitbit Web API the
+  client still calls was turned off on 2026-11-02, so `fm auth login` / `fm import`
+  against `api.fitbit.com` cannot work until the port in that ADR's section 10 lands.
 * [docs/adr/0003-storage-model.md](docs/adr/0003-storage-model.md) - why raw payloads
   are the record, one `series` table plus typed views, and what makes an overlapping
   import idempotent.

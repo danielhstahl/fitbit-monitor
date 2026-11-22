@@ -28,6 +28,7 @@ SRC = REPO / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from fitbit_monitor.api.catalog import CATALOG  # noqa: E402
 from fitbit_monitor.cli import build_parser  # noqa: E402
 from fitbit_monitor.plugins.runner import (  # noqa: E402
     EXIT_NO_STORE,
@@ -204,6 +205,59 @@ class LinksAndFacts(unittest.TestCase):
         )
         for line in ("fm plugins list --dir", "fm plugins run x", "PluginContractTestCase"):
             self.assertIn(line, readme)
+
+
+class HealthSourceIsDecidedOnce(unittest.TestCase):
+    """ADR-0002 is where the data source gets decided, so it has to stay concrete.
+
+    The point of the file is that Epic 2 (client + OAuth) and Epic 4 (archive import)
+    need no further source decisions, which means the answers have to be *in* it: the
+    host, the scopes, the limits, the access path, the fallback, and the adapter rule.
+    """
+
+    ADR = DOCS / "adr" / "0002-health-api-source.md"
+    DECIDED_SCOPES = (
+        "health_metrics_and_measurements.readonly",
+        "activity_and_fitness.readonly",
+        "sleep.readonly",
+        "profile.readonly",
+    )
+
+    def test_the_adr_exists_and_is_accepted(self) -> None:
+        self.assertTrue(self.ADR.is_file(), "docs/adr/0002-health-api-source.md is missing")
+        self.assertIn("- **Status:** accepted", self.ADR.read_text())
+        self.assertIn("0002-health-api-source.md", (REPO / "README.md").read_text())
+
+    def test_it_records_what_is_dead_and_what_replaced_it(self) -> None:
+        text = self.ADR.read_text()
+        self.assertIn("health.googleapis.com/v4", text, "the decided host is missing")
+        self.assertIn("api.fitbit.com", text, "the rejected legacy host is not named")
+        self.assertIn("Google Fit", text, "the other candidate is not answered")
+        self.assertIn("2026-11-02", text, "the legacy turn-off date is not recorded")
+
+    def test_it_names_the_scope_set_and_what_a_missing_one_costs(self) -> None:
+        text = self.ADR.read_text()
+        self.assertIn("https://www.googleapis.com/auth/googlehealth", text)
+        for scope in self.DECIDED_SCOPES:
+            self.assertIn(scope, text, f"{scope} is not in the decided scope table")
+        self.assertIn("MISSING_OAUTH_SCOPE", text, "the refusal without a scope is not recorded")
+
+    def test_it_records_the_limits_a_client_has_to_obey(self) -> None:
+        text = self.ADR.read_text()
+        for fact in ("300 requests", "10 000", "14 days", "90 days", "RESOURCE_EXHAUSTED"):
+            self.assertIn(fact, text, f"{fact} belongs in the limits section")
+
+    def test_it_answers_the_personal_access_question_and_keeps_the_archive_first_class(self) -> None:
+        text = self.ADR.read_text()
+        self.assertIn("Personal mode", text)
+        self.assertIn("Takeout", text)
+        self.assertIn("class Source(Protocol)", text, "the adapter interface is the decision")
+
+    def test_it_maps_every_dataset_the_catalog_imports(self) -> None:
+        """A dataset the code can import but the ADR does not place is an undecided source."""
+        text = self.ADR.read_text()
+        for name in sorted(CATALOG):
+            self.assertIn(f"`{name}`", text, f"ADR-0002 §7 does not place the {name} dataset")
 
 
 if __name__ == "__main__":  # pragma: no cover

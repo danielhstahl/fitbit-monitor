@@ -17,6 +17,17 @@ The token file is written `0600` and **refused at read time** if anything widene
 the whole account. `fm config path` prints every resolved location if a store or a
 token file is not where you expected.
 
+> **Which API, and its status (2026-11-22).** The decided source is the **Google Health
+> API** at `https://health.googleapis.com/v4`, with the export archive as an equal
+> first-class source; the whole decision, its sources and its dates are
+> [ADR-0002](adr/0002-health-api-source.md). The client code in `src/fitbit_monitor/api/`
+> still speaks the **legacy Fitbit Web API** dialect (`api.fitbit.com`, `/1/user/-/…`,
+> `X-RateLimit-*`), which Google turned off on **2026-11-02**: those endpoints answer
+> `401` and return no data, so a real `fm auth login` / `fm import` run cannot work
+> until the port in ADR-0002 section 10 lands. Nothing below changes shape in that port -
+> same commands, same datasets, same report - only the host, the endpoints and the
+> arithmetic in [Planning before spending](#planning-before-spending).
+
 ## What "imported" means
 
 Five datasets, each with its own endpoint shape (see
@@ -60,8 +71,13 @@ interleaving chunks or fighting over the rate-limit budget. The lock is an advis
 
 ## Planning before spending
 
-Fitbit allows ~150 requests per hour per user, and a full history is tens of
-thousands of them. So the plan is a first-class artifact:
+The legacy API allowed ~150 requests per hour per user, and a full history was tens of
+thousands of them, which is why the plan is a first-class artifact. The decided source
+is different in kind: 300 requests per minute per user, requests that each cover a
+window instead of a day, and no history limit at all - a five-year per-minute heart-rate
+backfill is about 300 requests rather than about twelve hours of wall clock
+(ADR-0002 §6). The plan stays mandatory either way, because the expensive question is
+now "how many rows will this write" more than "how many calls will this cost".
 
 ```console
 $ fm import --since 2026-05-01 --until 2026-05-14 --dry-run
@@ -126,10 +142,12 @@ dataset per run (with its error), and each run also writes a JSON report to
 `fm import watermarks` joins in each dataset's last status, so "how far did it get"
 and "how did it end" are one table.
 
-## Backfilling from a CSV export
+## Backfilling from an export archive
 
-The API is capped at ~1 request per hour for a full history at 1-minute
-granularity, so the web export (or Google Takeout) is often the faster first load:
+Years of history arrive faster from an archive than from any API, and the archive needs
+no client id, no consent and no network, so it is the first load *and* the way back in
+when the API is unavailable (ADR-0002 §8). Today the archive is **Google Takeout**;
+Fitbit's old `fitbit.com/export-your-data` page is gone (a `404` as of 2026-11-22).
 
 ```bash
 fm import --source csv --path ~/Downloads/export.zip --dry-run   # what is in there
@@ -150,7 +168,8 @@ date as usual.
 
 ```toml
 [api]
-base_url = "https://api.fitbit.com"   # the only host data is sent to
+base_url = "https://api.fitbit.com"   # the only host data is sent to (ADR-0002 §10
+                                      # changes this default to health.googleapis.com)
 client_id = "..."
 redirect_port = 55432
 timeout = 30.0
@@ -182,6 +201,9 @@ the headless-machine case.
 
 ## See also
 
+* [ADR-0002](adr/0002-health-api-source.md) - the source itself: which API, the four
+  scopes, why a personal account can get access without an approval queue, the limits,
+  and the archive as a first-class source.
 * [ADR-0005](adr/0005-ad-hoc-import.md) - why chunks, watermarks and per-dataset
   failure are the shape of this thing.
 * [data-policy.md](data-policy.md) - what leaves the machine, now that the API is

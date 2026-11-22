@@ -7,9 +7,11 @@ are written to agree with.
 ## The rule
 
 **Your health data stays on this machine.** The program talks to exactly two
-destinations, both because you asked: the Fitbit API, when and only when you run
-`fm auth` or `fm import`, and the alert webhook you configure. There is no third
-party, no background service, and no telemetry.
+destinations, both because you asked: the health API - the **Google Health API** at
+`health.googleapis.com`, decided in
+[ADR-0002](adr/0002-health-api-source.md), whose OAuth endpoints are Google's - when and
+only when you run `fm auth` or `fm import`, and the alert webhook you configure. There
+is no third party, no background service, and no telemetry.
 
 ## In
 
@@ -24,13 +26,14 @@ Nothing you did not choose, and only while an import is running:
 
 | request | sent | why |
 |---|---|---|
-| `fm auth login` / token refresh | your PKCE verifier and authorization code, then the refresh token | to get and renew a token; to `auth.fitbit.com` |
-| `fm import` | `Authorization: Bearer <token>`, the date range you asked for, and an `If-None-Match` ETag when we have one | to fetch the days you named; to `[api] base_url` (default `https://api.fitbit.com`) |
+| `fm auth login` / token refresh | your PKCE verifier and authorization code, then the refresh token | to get and renew a token; `accounts.google.com` / `oauth2.googleapis.com` once ADR-0002 §10 lands (today the code still dials the legacy Fitbit endpoints) |
+| `fm import` | `Authorization: Bearer <token>`, the date range you asked for, and an `If-None-Match` ETag when we have one | to fetch the window you named; to `[api] base_url` - the decided value is `https://health.googleapis.com/v4`, the committed default is still `https://api.fitbit.com` until ADR-0002 §10 step 2 lands |
 
 Plain HTTP is refused for the webhook - `https` or the loopback exception, never a
 plaintext internet hop. The API endpoints default to `https` and only change if you
 edit `[api]` yourself (a loopback URL there is how the login flow is tested). No
-query, metric or stored value is ever sent *out* to Fitbit; the calls are reads.
+query, metric or stored value is ever sent *out* to the health service; the calls are
+reads.
 
 Nothing else in the program opens a socket. Not the store, not the plugin runner,
 not the alert history, not the benchmarks. An import is the only thing that
@@ -177,6 +180,6 @@ no server-side copy to delete, which is the point.
 
 ## Not covered here
 
-Fitbit's own retention and the terms under which the API grants access are the
-service's policy, not this program's. This document describes what *this program*
-does with what it is given.
+The health service's own retention, and the terms under which its API grants access,
+are the service's policy, not this program's. This document describes what *this
+program* does with what it is given.
