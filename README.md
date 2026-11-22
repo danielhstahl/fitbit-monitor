@@ -170,7 +170,7 @@ anywhere else in this repository (not in `.github/workflows/*.yml`, not in a Mak
 ```bash
 ./scripts/ci/lint.sh --no-install         # typecheck.sh, then ruff, byte-compile, YAML, shell
 ./scripts/ci/typecheck.sh --no-install    # mypy alone
-./scripts/ci/coverage.sh --no-install     # unittest + pytest + coverage floor
+./scripts/ci/coverage.sh --no-install     # unittest + pytest, then the floors; prints `coverage: NN.N%`
 ./scripts/ci/benchmarks.sh --no-install   # compare against benchmarks/baseline.json
 ./scripts/ci/post_commit.sh --quick       # skip the benchmark
 ```
@@ -184,15 +184,23 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Python 3.11+ (`.python-version` is the interpreter uv uses for the dev environment;
-CI runs 3.11, 3.12, 3.13 and 3.14). Runtime dependencies: none - stdlib only, so a
-plugin author needs nothing but Python. Dev dependencies (`.[dev]`): pytest,
-pytest-cov, coverage, mypy, ruff, pyyaml.
+Python 3.11+ (`.python-version` is the band: the interpreter uv uses for the dev
+environment and the one `actions/setup-python` installs in CI, so no version number is
+written in the workflow files; the coverage job runs one leg per entry, 3.11 through
+3.14). Runtime dependencies: none - stdlib only, so a plugin author needs nothing but
+Python. Dev dependencies (`.[dev]`): pytest, pytest-cov, coverage, mypy, ruff, pyyaml.
 
 The CI gates live in `scripts/ci/*.sh` and the workflows only call them
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml),
 [`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml)), so a laptop
-and a runner fail the same way.
+and a runner fail the same way. The coverage gate ends by printing one machine-readable
+line - `coverage: 92.1%` - and a line per package, and fails below any floor committed
+in `pyproject.toml`: `[tool.coverage.report] fail_under` for the whole tree and
+`[tool.fitbit_monitor.coverage]` for each directory under `src/fitbit_monitor`. It
+writes `coverage.xml` and `coverage.json`, both uploaded as artifacts. The jobs need no
+secrets and no network beyond the package index, so they run under `act`
+(`act -j coverage --artifact-server-path /tmp/artifacts`) exactly as they run on GitHub;
+without a container runtime, `./scripts/ci/post_commit.sh` runs the same gates.
 
 Things the tests hold to, worth knowing before you change them:
 
@@ -204,6 +212,12 @@ Things the tests hold to, worth knowing before you change them:
   third-party plugin authors inherit; the shipped plugin runs against it in CI.
 * `benchmarks/baseline.json` is updated on purpose, with
   `./scripts/ci/benchmarks.sh --update-baseline`.
+* `.github/workflows/ci.yml` is checked, not trusted: it must call
+  `scripts/ci/coverage.sh` and nothing else, take its interpreter from
+  `.python-version`, cache dependencies, upload both coverage reports and carry no
+  secrets, and its matrix must match the committed band
+  (`tests/test_ci_coverage_gate.py`, which also tests the floor arithmetic against
+  synthetic reports).
 
 ### Layout
 
@@ -221,7 +235,7 @@ src/fitbit_monitor/
 docs/          storage.md, plugins.md, data-import.md, data-policy.md, adr/
 scripts/       _python.sh - the one interpreter resolver; no script guesses at python3
                dev/{bootstrap,lint,typecheck,test,coverage,bench,check,docs}.sh + record_fixtures.py - what you type;
-               ci/{lint,typecheck,coverage,benchmarks,post_commit}.sh - the gates; bench/, docs/
+               ci/{lint,typecheck,coverage,benchmarks,post_commit}.sh + _coverage_report.py - the gates; bench/, docs/
 tests/         stdlib unittest - runs under pytest or `python -m unittest discover`
 tooling        configured in pyproject.toml, pinned in uv.lock - no config files to drift
 ```

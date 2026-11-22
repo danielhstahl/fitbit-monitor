@@ -65,6 +65,20 @@ exclude_lines = [
   "@overload",
 ]
 
+# Per-package coverage floors, enforced by scripts/ci/coverage.sh and by nothing else.
+# `fail_under` above gates the whole tree; a floor here gates one directory under
+# src/fitbit_monitor at a time, so a package cannot be quietly hollowed out by work
+# that is only tested somewhere else. Keys are those directory names ("." means the
+# modules at the root); an unlisted directory falls back to default_package_floor.
+#
+# A floor is a ratchet, not a target: each one sits about four points under what the
+# tree measures today (measured with branches on, the same way the gate adds up), so
+# unrelated work cannot brush past it, and it goes up in the commit that raises it.
+# coverage.py ignores this table - it reads [tool.coverage.*].
+[tool.fitbit_monitor.coverage]
+default_package_floor = 80.0
+package_floors = { "." = 87.0, api = 88.0, cli = 82.0, ingest = 87.0, plugins = 92.0, store = 92.0 }
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

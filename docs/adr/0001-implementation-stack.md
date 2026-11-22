@@ -48,7 +48,7 @@ spend its time on something else.
 | CLI | stdlib `argparse` | Typer, Click |
 | storage | stdlib `sqlite3`, one file | DuckDB, Parquet/pyarrow, sqlmodel/SQLAlchemy, JSON blobs |
 | tests | pytest, cases written as `unittest.TestCase` | bare unittest, nox/tox |
-| coverage | coverage.py, branch, `fail_under = 85` | `--cov` alone, diff-cover, mutation testing |
+| coverage | coverage.py, branch, `fail_under = 85` + per-package floors | `--cov` alone, diff-cover, mutation testing |
 | benchmark | `scripts/bench` vs `benchmarks/baseline.json` | pytest-benchmark, asv |
 | lint | ruff, tier-1 rule set committed | pyflakes (retired), flake8+isort+black, pylint |
 | format | ruff format, **enforcement deferred** to a named commit | black, "no formatter" |
@@ -298,8 +298,14 @@ to loop over that list is a fifth tool to learn. If the matrix ever grows an axi
 
 coverage.py is the tool of record; `scripts/ci/coverage.sh` runs
 `coverage run --branch --source=src/fitbit_monitor -m pytest`, then
-`coverage report` (which enforces `[tool.coverage.report] fail_under = 85`) and
-`coverage xml` for the artifact the CI job uploads. pytest-cov is installed in the dev
+`coverage report` (which enforces `[tool.coverage.report] fail_under = 85`) and writes
+`coverage.xml` and `coverage.json`, both of which the CI job uploads as artifacts. The
+final step is `scripts/ci/_coverage_report.py`, which reads the JSON report, prints the
+one machine-readable line a laptop and the runner both grep for (`coverage: 92.1%`) and
+enforces the floors: `fail_under` overall, plus a floor per directory under
+`src/fitbit_monitor` from `[tool.fitbit_monitor.coverage]`. Both numbers are in
+`pyproject.toml` and nowhere else, so the floor that fails a push is reviewable in the
+diff that changes it. pytest-cov is installed in the dev
 extra so `pytest --cov` works when someone wants it; the *gate* does not depend on it,
 which is what makes the coverage number one number rather than two.
 
@@ -308,7 +314,11 @@ exercised is exactly the kind of promise this program makes about bad data.
 
 **Rejected: statement-only coverage** (hides half-dead branches). **Rejected:
 diff-cover / "85% of the diff"** (a diff-scoped floor never pays down the parts of the
-store that need it most). **Rejected: mutation testing** (mutmut/cosmic-ray) - the
+store that need it most). **Rejected: a floor written in the workflow YAML** - the
+number would live in the file that is easiest to edit under pressure and invisible to a
+laptop running the same gate; `--floor` and `--package-floor` exist on the script to
+*try* a ratchet, and the committed floor stays in `pyproject.toml`. **Rejected:
+mutation testing** (mutmut/cosmic-ray) - the
 strongest of these options and genuinely tempting, but minutes-to-hours per run against
 a gate that currently finishes in tens of seconds; it belongs in a scheduled job, if
 it ever arrives. Neither is a decision this repository needs now, and neither is free.
@@ -448,10 +458,19 @@ above is exactly what the README names, and `tests/test_tooling.py` fails if an
 entrypoint is added without being documented or documented without existing.
 
 Both workflows stay thin: `ci.yml` runs `uv run --locked --extra dev --python <matrix>
-./scripts/ci/{lint,coverage}.sh --no-install` over 3.11-3.14 and uploads
-`coverage.xml`; `benchmark.yml` does the same with `benchmarks.sh`. `--locked` is what
-makes a stale `uv.lock` a CI failure, which is the difference between a pin and a
-suggestion.
+./scripts/ci/{lint,coverage}.sh --no-install` and uploads both reports the gate writes
+(`coverage.xml`, `coverage.json`); `benchmark.yml` does the same with `benchmarks.sh`.
+`--locked` is what makes a stale `uv.lock` a CI failure, which is the difference between
+a pin and a suggestion. Nothing else lives in the YAML: no `pip install`, no `curl`, no
+floor arithmetic, no secrets - which is what lets `act` run either file with no setup.
+The interpreter band is `.python-version` and nothing else - `actions/setup-python` is
+given `python-version-file: .python-version`, the matrix lists the same band (a test
+fails if the two drift), and `--artifact-name` / `--json-artifact-name` are passed to
+the gate so the names it prints are the names uploaded. Coverage floors are committed
+in `pyproject.toml`: `[tool.coverage.report] fail_under` overall and
+`[tool.fitbit_monitor.coverage]` per package, so the number that fails a push is
+reviewable in one file and `scripts/ci/_coverage_report.py` is the only thing that
+implements it.
 
 Two properties of the wrappers are tested rather than trusted (`tests/test_tooling.py`):
 every `scripts/dev` gate wrapper names exactly one `scripts/ci` gate and passes

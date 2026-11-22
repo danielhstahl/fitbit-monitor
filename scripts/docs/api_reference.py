@@ -81,6 +81,13 @@ def _clean(text: str) -> str:
 
 
 def _signature(obj: object) -> str:
+    if isinstance(obj, type) and issubclass(obj, enum.Enum):
+        # `inspect.signature` on an Enum class is not stable across the supported band
+        # (3.11 shows the functional-API call signature, 3.14 shows `(*values)`), and a
+        # generated block that depends on the interpreter would make the CI matrix -
+        # which runs 3.11 through 3.14 against one committed file - unfalsifiable.
+        # Document what an enum takes: its values.
+        return "(*values)"
     try:
         text = str(inspect.signature(obj))  # type: ignore[arg-type]
     except (TypeError, ValueError):  # pragma: no cover - builtins

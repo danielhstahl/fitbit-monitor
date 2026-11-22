@@ -2,12 +2,22 @@ name: CI
 
 # One job per concern that the repository promises to keep green: this one runs the
 # tests and fails under the coverage floor; `benchmark.yml` owns the perf gate.
-# Both delegate to scripts/ci/*.sh so a laptop and the runner agree.
+# Both delegate to scripts/ci/*.sh so a laptop and the runner agree, and neither
+# carries a command line, a version number or a floor of its own.
 #
 # Dependency installation goes through uv and uv.lock (`--locked` makes a stale
 # lockfile a CI failure, so the pin committed in git cannot quietly rot). The
 # pip-equivalent path - `pip install -e ".[dev]"` - stays supported for people who
-# refuse a new tool; it is what scripts/ci/*.sh do without --no-install. ADR-0001 §2.
+# refuse a new tool; it is what scripts/ci/*.sh do without --no-install. ADR-0001 §2, §3.
+#
+# Runs with no secrets and needs no network beyond the package index and the
+# interpreter install, which is what lets `act` (or act-mcp) run this file locally -
+# `--artifact-server-path` gives the upload steps somewhere to put the two reports:
+#
+#     act -j coverage --artifact-server-path /tmp/artifacts
+#
+# or, without a container runtime at all: ./scripts/ci/post_commit.sh runs the same
+# gates in the checkout.
 
 on:
   push:
@@ -28,36 +38,59 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The interpreter comes from the committed version file, never from a literal in
+      # this file: .python-version is the band and the only place it is written down.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
+      # The dependency cache step: uv's download/cache dir, keyed on the lockfile.
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          cache-dependency-path: uv.lock
       - name: Lint (mypy, ruff, byte-compile)
-        run: uv run --locked --extra dev --python "3.12" ./scripts/ci/lint.sh --no-install
+        run: uv run --locked --extra dev ./scripts/ci/lint.sh --no-install
 
   coverage:
-    name: Tests and coverage (3.11, 3.12, 3.13, 3.14)
+    name: Tests and coverage (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        # One leg per interpreter committed in .python-version; the two must agree, and
+        # tests/test_ci_coverage_gate.py fails the suite if they ever drift. uv is
+        # told which of the installed band to run this leg under, so the floor
+        # interpreter (3.11) is really exercised rather than assumed.
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version-file: .python-version
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          cache-dependency-path: uv.lock
       - name: Tests and coverage gate
-        run: uv run --locked --extra dev --python "${{ matrix.python-version }}" ./scripts/ci/coverage.sh --no-install
-      - name: Upload coverage report
-        if: matrix.python-version == '3.12'
+        run: >-
+          uv run --locked --extra dev --python "${{ matrix.python-version }}"
+          ./scripts/ci/coverage.sh --no-install
+          --xml-out coverage.xml
+          --json-out coverage.json
+          --artifact-name coverage-xml-${{ matrix.python-version }}
+          --json-artifact-name coverage-json-${{ matrix.python-version }}
+      # The two reports scripts/ci/coverage.sh wrote, named the same way the gate named
+      # them on its own output. Unique per matrix leg because upload-artifact v4
+      # refuses a name two legs have already used.
+      - name: Upload coverage.xml
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-xml
+          name: coverage-xml-${{ matrix.python-version }}
           path: coverage.xml
+          if-no-files-found: error
+      - name: Upload coverage.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-json-${{ matrix.python-version }}
+          path: coverage.json
           if-no-files-found: error
