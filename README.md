@@ -126,7 +126,9 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
   are the record, one `series` table plus typed views, and what makes an overlapping
   import idempotent.
 * [docs/adr/0004-plugin-contract.md](docs/adr/0004-plugin-contract.md) - the
-  normative contract: interfaces, discovery, config, versioning, isolation.
+  normative contract: the exact interface and the fields of every emitted model,
+  discovery and precedence, config, versioning, isolation, and the suite a
+  third-party plugin must pass.
 * [docs/adr/0005-ad-hoc-import.md](docs/adr/0005-ad-hoc-import.md) - why chunks,
   watermarks and per-dataset failure are the shape of the importer.
 * [docs/data-policy.md](docs/data-policy.md) - what leaves the machine (the API you

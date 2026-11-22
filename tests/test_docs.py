@@ -7,7 +7,9 @@ Three ways docs go stale, all of them checked here:
 * a **worked example** that no longer runs - the plugin in ``docs/plugins.md`` is
   executed against the same fixture store the contract suite uses;
 * a **command line** that no longer parses - every ``fm`` invocation in the docs is
-  parsed by the real argument parser.
+  parsed by the real argument parser;
+* a **decision** that quietly stopped matching the code - ADR-0004 pins the plugin
+  contract, so every plugin-facing name in the code must be named in it.
 
 Also checks the exit-code table matches the constants the runner actually returns,
 and that the relative links in the docs point at files that exist.
@@ -15,7 +17,10 @@ and that the relative links in the docs point at files that exist.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
+import inspect
+import io
 import re
 import shlex
 import sys
@@ -30,13 +35,35 @@ if str(SRC) not in sys.path:
 
 from fitbit_monitor.api.catalog import CATALOG  # noqa: E402
 from fitbit_monitor.cli import build_parser  # noqa: E402
+from fitbit_monitor.plugins.contract import (  # noqa: E402
+    MIN_PLUGIN_API_VERSION,
+    PLUGIN_API_VERSION,
+    MonitorPlugin,
+    PluginContext,
+)
+from fitbit_monitor.plugins.errors import STAGES  # noqa: E402
+from fitbit_monitor.plugins.models import Alert, Evidence, MetricResult  # noqa: E402
 from fitbit_monitor.plugins.runner import (  # noqa: E402
+    DEFAULT_TIMEOUT_SECONDS,
     EXIT_NO_STORE,
     EXIT_OK,
     EXIT_PLUGIN_ERROR,
     EXIT_USAGE,
+    STATUS_CONFIG_ERROR,
+    STATUS_ERROR,
+    STATUS_NO_DATA,
+    STATUS_OK,
+    STATUS_SKIPPED,
+    STATUS_TIMEOUT,
 )
-from fitbit_monitor.plugins.testing import fixture_store, run_fixture_plugin  # noqa: E402
+from fitbit_monitor.plugins import testing as plugin_testing  # noqa: E402
+from fitbit_monitor.plugins.testing import (  # noqa: E402
+    FIXTURE_DAYS,
+    FIXTURE_END,
+    fixture_store,
+    run_fixture_plugin,
+)
+from fitbit_monitor.store.reader import ReadOnlyStore  # noqa: E402
 
 DOCS = REPO / "docs"
 SCRIPTS = REPO / "scripts"
@@ -258,6 +285,224 @@ class HealthSourceIsDecidedOnce(unittest.TestCase):
         text = self.ADR.read_text()
         for name in sorted(CATALOG):
             self.assertIn(f"`{name}`", text, f"ADR-0002 §7 does not place the {name} dataset")
+
+
+class PluginContractIsDecidedOnce(unittest.TestCase):
+    """ADR-0004 is where the plugin contract gets pinned, so it has to stay exact.
+
+    Epics 5 and 6 write against this file, which means the answers have to be *in*
+    it: the base-class signatures, every field of the emitted models, the read API,
+    discovery and precedence, configuration, versioning, isolation, the conformance
+    suite, and a sample plugin a reader can copy. Each check is driven from the code,
+    so a plugin-facing addition that skips the ADR fails - the same way the generated
+    API reference fails when it goes stale.
+    """
+
+    ADR = DOCS / "adr" / "0004-plugin-contract.md"
+    #: Plumbing rather than contract: the lifecycle call and the raw dataclass field.
+    STORE_PLUMBING = {"close", "connection"}
+
+    @classmethod
+    def text(cls) -> str:
+        return cls.ADR.read_text(encoding="utf-8")
+
+    @classmethod
+    def sample(cls) -> str:
+        for block in _fenced_blocks(cls.text(), "python"):
+            if "class RestingHrDrift" in block:
+                return block
+        raise cls.failureException("ADR-0004 no longer contains the sample plugin")
+
+    @classmethod
+    def sample_class(cls):
+        namespace: dict = {"__name__": "adr_0004_sample"}
+        exec(compile(cls.sample(), "adr/0004-plugin-contract.md#sample", "exec"), namespace)
+        return namespace["RestingHrDrift"]
+
+    def test_the_adr_exists_and_is_accepted(self) -> None:
+        self.assertTrue(self.ADR.is_file(), "docs/adr/0004-plugin-contract.md is missing")
+        self.assertIn("- **Status:** accepted", self.text())
+        self.assertIn("0004-plugin-contract.md", (REPO / "README.md").read_text())
+
+    def test_it_gives_the_exact_lifecycle_signatures(self) -> None:
+        text = self.text()
+        for method in (MonitorPlugin.configure, MonitorPlugin.run):
+            signature = re.sub(r"\s+", " ", str(inspect.signature(method)).replace("'", ""))
+            self.assertIn(
+                signature,
+                text,
+                f"ADR-0004 must give configure()/run() exactly as implemented: {signature}",
+            )
+
+    def test_it_gives_the_emission_signatures(self) -> None:
+        text = self.text()
+        for needle in (
+            "def metric(self, key: str, value: float | int | str, *",
+            "def alert(self, key: str, title: str, message: str, *",
+            "occurred_at: datetime",
+            "severity: Severity | str = Severity.WARNING",
+            "dedup_key: str | None = None",
+        ):
+            self.assertIn(needle, text, f"ADR-0004 §3 does not spell out `{needle}`")
+
+    def test_it_tabulates_every_field_of_the_returned_models(self) -> None:
+        """A field a plugin can emit but the ADR does not tabulate is undecided."""
+        text = self.text()
+        for model in (MetricResult, Alert, Evidence):
+            for field in dataclasses.fields(model):
+                self.assertIn(
+                    f"| `{field.name}` |",
+                    text,
+                    f"ADR-0004 §4 has no row for {model.__name__}.{field.name}",
+                )
+
+    def test_it_names_both_kinds_of_plugin(self) -> None:
+        text = self.text()
+        for kind in ("metric-producing", "alerting", "`MetricResult`", "`Alert`"):
+            self.assertIn(kind, text, f"ADR-0004 §1 does not name the {kind} kind")
+
+    def test_it_records_the_validation_rules(self) -> None:
+        text = self.text()
+        for needle in (
+            '"info"',
+            '"warning"',
+            '"critical"',
+            "0.0 .. 1.0",
+            "chronological",
+            "naive",
+            "must not precede",
+            "tz-aware",
+            "frozen dataclasses",
+        ):
+            self.assertIn(needle, text, f"ADR-0004 §4 does not record the {needle!r} rule")
+
+    def test_it_names_every_read_only_accessor(self) -> None:
+        text = self.text()
+        for name in sorted(n for n in dir(ReadOnlyStore) if not n.startswith("_")):
+            if name in self.STORE_PLUMBING:
+                continue
+            self.assertIn(name, text, f"ADR-0004 §3 does not document ReadOnlyStore.{name}")
+
+    def test_it_names_every_context_member(self) -> None:
+        text = self.text()
+        for name in sorted(n for n in dir(PluginContext) if not n.startswith("_")):
+            self.assertIn(f"`{name}", text, f"ADR-0004 §3 does not document PluginContext.{name}")
+
+    def test_it_names_every_failure_stage_and_status(self) -> None:
+        text = self.text()
+        for name in (
+            "PluginError",
+            "PluginImportError",
+            "PluginRegistrationError",
+            "PluginConfigError",
+            "PluginRuntimeError",
+            "PluginTimeout",
+        ):
+            self.assertIn(name, text, f"ADR-0004 §8 does not name {name}")
+        for stage in STAGES:
+            self.assertIn(stage, text, f"ADR-0004 §8 does not name the {stage} stage")
+        for status in (
+            STATUS_OK,
+            STATUS_NO_DATA,
+            STATUS_SKIPPED,
+            STATUS_CONFIG_ERROR,
+            STATUS_ERROR,
+            STATUS_TIMEOUT,
+        ):
+            self.assertIn(f"`{status}`", text, f"ADR-0004 §8 does not report the {status} status")
+        for code in (EXIT_OK, EXIT_PLUGIN_ERROR, EXIT_USAGE, EXIT_NO_STORE):
+            self.assertIn(f"| `{code}` |", text, f"ADR-0004 §8 does not document exit code {code}")
+
+    def test_it_fixes_the_discovery_sources_and_precedence(self) -> None:
+        from fitbit_monitor.plugins import ENTRY_POINT_GROUP
+
+        text = self.text()
+        self.assertIn(ENTRY_POINT_GROUP, text, "the entry-point group must be named exactly")
+        for needle in (
+            "[plugins]",
+            "dirs",
+            "FM_PLUGIN_DIRS",
+            "*.py",
+            "<pkg>/plugin.py",
+            "directory` > `entry_point` > `builtin",
+            "collision",
+            "entry_point",
+            "builtin",
+        ):
+            self.assertIn(needle, text, f"ADR-0004 §5 does not decide {needle!r}")
+
+    def test_it_states_the_no_write_rule_and_how_it_is_enforced(self) -> None:
+        text = self.text()
+        for needle in ("mode=ro", "PRAGMA query_only=ON", "MUST NOT write", "sqlite3.OperationalError"):
+            self.assertIn(needle, text, f"ADR-0004 §3 must state {needle!r}")
+
+    def test_it_pins_the_version_policy_to_the_code_constants(self) -> None:
+        text = self.text()
+        self.assertIn(f"PLUGIN_API_VERSION: Final[int] = {PLUGIN_API_VERSION}", text)
+        self.assertIn(f"MIN_PLUGIN_API_VERSION: Final[int] = {MIN_PLUGIN_API_VERSION}", text)
+        for needle in ("requires_api", "needs plugin API", "dropped", "fm plugins --api", "additive"):
+            self.assertIn(needle, text, f"ADR-0004 §7 does not decide {needle!r}")
+
+    def test_it_names_the_budget_the_runner_actually_uses(self) -> None:
+        text = self.text()
+        self.assertIn(f"DEFAULT_TIMEOUT_SECONDS = {DEFAULT_TIMEOUT_SECONDS:g}", text)
+        for needle in ("timeout_seconds", "--timeout", "daemon", "check_timeout", "cooldown", "36h"):
+            self.assertIn(needle, text, f"ADR-0004 §8/§11 does not name {needle!r}")
+
+    def test_it_enumerates_the_contract_suite_the_code_publishes(self) -> None:
+        text = self.text()
+        self.assertIn("fitbit_monitor.plugins.testing", text)
+        self.assertIn("PluginContractTestCase", text)
+        for needle in ("fixture_store", "fixture_window", "empty_window", "run_fixture_plugin"):
+            self.assertIn(needle, text, f"ADR-0004 §9 does not publish {needle}()")
+        self.assertIn(f"{FIXTURE_DAYS} days", text, "the fixture length is not recorded")
+        self.assertIn(FIXTURE_END.isoformat(), text, "the fixture end date is not recorded")
+
+    def test_it_documents_how_config_reaches_a_plugin(self) -> None:
+        text = self.text()
+        for needle in (
+            "[plugins.<name>]",
+            "PluginOption",
+            "int | float | bool | str | duration | list",
+            "unknown_keys",
+            "unused config keys",
+            "enabled",
+            "configure()",
+            "datasets",
+        ):
+            self.assertIn(needle, text, f"ADR-0004 §6 does not decide {needle!r}")
+
+    def test_the_sample_plugin_is_twenty_lines_or_fewer(self) -> None:
+        lines = self.sample().rstrip("\n").split("\n")
+        self.assertLessEqual(len(lines), 20, f"the ADR sample is {len(lines)} lines: trim it")
+
+    def test_the_sample_plugin_runs_and_reports_both_kinds(self) -> None:
+        plugin_cls = self.sample_class()
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = fixture_store(tmp)
+            quiet = run_fixture_plugin(plugin_cls, store_path=store_path)
+            loud = run_fixture_plugin(plugin_cls, store_path=store_path, config_values={"high_bpm": 50.0})
+        self.assertEqual(quiet.status, STATUS_OK, quiet.error)
+        self.assertEqual([m.key for m in quiet.metrics], ["resting_hr_mean"])
+        self.assertEqual(quiet.alerts, [], "the default threshold must not alert on the fixture")
+        self.assertEqual(loud.status, STATUS_OK, loud.error)
+        self.assertEqual(len(loud.alerts), 1, "lowering the option must produce the alert")
+        alert = loud.alerts[0]
+        self.assertEqual(alert.key, "high")
+        self.assertEqual(alert.severity.value, "warning")
+        self.assertIsNotNone(alert.occurred_at.tzinfo)
+        self.assertTrue(alert.evidence and alert.evidence[0].at.tzinfo, "evidence needs a tz-aware timestamp")
+
+    def test_the_sample_plugin_passes_the_contract_suite(self) -> None:
+        """The ADR's own example is held to the suite it tells authors to run."""
+        suite_cls = type(
+            "AdrSampleConformance",
+            (plugin_testing.PluginContractTestCase,),
+            {"plugin_cls": self.sample_class()},
+        )
+        suite = unittest.TestLoader().loadTestsFromTestCase(suite_cls)
+        result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+        self.assertTrue(result.wasSuccessful(), "the ADR sample fails the suite it ships")
 
 
 if __name__ == "__main__":  # pragma: no cover
