@@ -6,7 +6,7 @@
 # push. This is the script an act-mcp style runner invokes (it needs the repository
 # root as its workspace, because that is where .github/workflows/*.yml lives):
 #
-#     act-mcp --workspace .            # finds .github/workflows/{ci,benchmark}.yml
+#     act-mcp --workspace .            # finds .github/workflows/{ci,bench}.yml
 #     ./scripts/ci/post_commit.sh      # or run it by hand, or as a git hook
 #
 # Install it as a hook:
@@ -51,7 +51,7 @@ if [[ "$QUICK" -eq 1 ]]; then
     log "benchmarks"
     echo "SKIP  benchmarks (--quick)"
 else
-    run "benchmarks" ./scripts/ci/benchmarks.sh --no-install
+    run "benchmarks" ./scripts/ci/bench.sh --no-install
 fi
 
 log "result"

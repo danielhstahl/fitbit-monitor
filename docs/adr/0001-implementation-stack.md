@@ -4,7 +4,9 @@
 - **Date:** 2026-11-22
 - **Implements:** `pyproject.toml`, `uv.lock`, `.python-version`,
   `scripts/dev/*` and `scripts/ci/*`, `.github/workflows/ci.yml`,
-  `.github/workflows/benchmark.yml`; enforced by `tests/test_tooling.py`
+  `.github/workflows/bench.yml`, `docs/ci.md`;
+  enforced by `tests/test_tooling.py`, `tests/test_ci_coverage_gate.py`,
+  `tests/test_ci_bench_gate.py`
 - **Related:** ADR-0002 (data source - the HTTP client named in §2 is its transport),
   ADR-0003 (storage model - this ADR picks the engine, that one picks the schema),
   ADR-0004 (plugin contract - the main reason the runtime has no dependencies),
@@ -328,9 +330,11 @@ it ever arrives. Neither is a decision this repository needs now, and neither is
 `scripts/bench/bench_plugin_system.py` measures five cases in the order a real run
 pays for them - corpus write (rows/sec), intraday scan (points/sec), day downsampling
 (points/sec), the shipped plugin end-to-end (ms), discovery (ms) - takes the best of
-N repeats, and fails if any case moves more than 30 % against
-`benchmarks/baseline.json`. `scripts/ci/benchmarks.sh` is the gate; `benchmark.yml`
-runs it on every push and posts the numbers to the job summary.
+N repeats, and fails if any case moves more than 15 % against
+`benchmarks/baseline.json`. `scripts/ci/bench.sh` is the gate; `bench.yml` runs it on
+every push and pull request, posts the markdown the gate generated as the PR comment, and
+uploads the JSON it generated. (`docs/ci.md` is the operational half of this section:
+what each report is for and how to re-record the baseline.)
 
 The baseline is **committed JSON, with a unit and a direction per case**, so a
 re-record is a one-line diff a reviewer can read and refuse:
@@ -341,11 +345,26 @@ re-record is a one-line diff a reviewer can read and refuse:
   "direction": { "scan_intraday": "higher" } }
 ```
 
+**Amended on 2026-11-22 (foundations), three ways.** The tolerance moved **30 % →
+15 %**: at 30 % the job that had caught a real 25 % ingest regression could have
+shrugged off two of them stacked, and best-of-N over nine rounds is stable to a couple
+of percent on a quiet machine, so the tighter bar costs noise rather than signal. The
+baseline got **sample statistics and an environment** (`stats`: mean, stddev,
+iterations, best, worst; `environment`: interpreter, CPU, memory, git commit), because
+the best sample says how fast the code can be and says nothing about how much to trust
+it. And the gate got **two refusals** that keep a green honest: no baseline file is exit
+2 rather than an unmeasured pass, and a corpus size the baseline did not record is
+reported but not gated, because throughput over 30 days and over 90 days are different
+quantities. `--update-baseline` remains the only writer of the file, and CI never passes
+it - a run cannot re-baseline its own regression away.
+
 **Rejected: pytest-benchmark** (the recommendation). Its statistics - rounds,
 outliers, mean and stddev - are worth having for microsecond benchmarks; these are
 end-to-end scenarios where the setup (seed a 90-day corpus) is comparable to the
 measured work, so the honest statistic is best-of-N and the honest tolerance on a
-shared CI runner is ±30 % regardless of how many decimals the tool reports. Worse, its
+shared CI runner is ±30 % regardless of how many decimals the tool reports (the
+amendment above took the mean-and-stddev half of that criticism - they are reported now,
+alongside the iterations - while best-of-N remains the statistic that gates). Worse, its
 comparison history is a machine-oriented blob that cannot be reviewed in a diff, and
 reviewable diff *is* the point of the gate: this repository's benchmark job caught a
 real 25 % ingest regression (`seed_corpus` fell ~149k → ~112k rows/sec when a per-row
@@ -443,7 +462,7 @@ command line.
 | `scripts/dev/typecheck.sh` | mypy alone - the fast "did I break a type" answer | `scripts/ci/typecheck.sh --no-install` |
 | `scripts/dev/test.sh` | full suite + coverage floor | `scripts/ci/coverage.sh --no-install` |
 | `scripts/dev/coverage.sh` | the same gate under the name CI calls it, so "run the coverage gate" is answerable by name | `scripts/ci/coverage.sh --no-install` |
-| `scripts/dev/bench.sh` | perf gate vs the baseline; passes through `--update-baseline`, `--days`, `--json` | `scripts/ci/benchmarks.sh --no-install` |
+| `scripts/dev/bench.sh` | perf gate vs the baseline; passes through `--update-baseline`, `--days`, `--json` | `scripts/ci/bench.sh --no-install` |
 | `scripts/dev/check.sh` | all three, the way CI runs them; `--quick` skips the benchmark | `scripts/ci/post_commit.sh` |
 | `scripts/dev/docs.sh` | regenerate the generated API-reference block in `docs/plugins.md` | `scripts/docs/api_reference.py` |
 | `scripts/dev/record_fixtures.py` | (re)record the API fixtures; `--check` fails if they are stale | the importer tests replay `tests/fixtures/api` |
@@ -459,7 +478,8 @@ entrypoint is added without being documented or documented without existing.
 
 Both workflows stay thin: `ci.yml` runs `uv run --locked --extra dev --python <matrix>
 ./scripts/ci/{lint,coverage}.sh --no-install` and uploads both reports the gate writes
-(`coverage.xml`, `coverage.json`); `benchmark.yml` does the same with `benchmarks.sh`.
+(`coverage.xml`, `coverage.json`); `bench.yml` does the same with `bench.sh`, uploading
+`bench-results.json` and `bench-summary.md` and posting the markdown as the PR comment.
 `--locked` is what makes a stale `uv.lock` a CI failure, which is the difference between
 a pin and a suggestion. Nothing else lives in the YAML: no `pip install`, no `curl`, no
 floor arithmetic, no secrets - which is what lets `act` run either file with no setup.

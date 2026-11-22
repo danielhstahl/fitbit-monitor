@@ -1,0 +1,90 @@
+name: Benchmarks
+
+# The perf gate. Ingestion throughput and a plugin scan over months of intraday heart
+# rate are the numbers that get slow silently, so this job runs the committed benchmark
+# suite against the committed baseline (benchmarks/baseline.json) and fails on a
+# regression past the tolerance.
+#
+# Everything about the measurement lives in scripts/ci/bench.sh: this file has no
+# benchmark logic, no arithmetic, no formatting and no secret - it calls the script,
+# posts the markdown the script wrote, and uploads the JSON the script wrote. That is
+# what makes a laptop and a runner fail the same way, and what lets `act` (or act-mcp)
+# run this file as-is (AGENTS.md, ADR-0001 §12):
+#
+#     act -j benchmark --artifact-server-path /tmp/artifacts
+#
+# Re-record the baseline deliberately, never from here (docs/ci.md):
+#
+#     ./scripts/dev/bench.sh --update-baseline && git add benchmarks/baseline.json
+
+on:
+  push:
+    # Same branch list as ci.yml, on purpose - the two jobs are one gate and a PR runs
+    # them together either way. If the default branch ever moves, move both files.
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Only for the results comment below; nothing else in this file writes.
+  pull-requests: write
+
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Plugin system vs baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The interpreter comes from the committed version file, never a literal here
+      # (the first entry, 3.14, is the one the baseline is recorded on - perf numbers
+      # are only comparable when the interpreter is fixed, unlike the coverage matrix).
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-path: uv.lock
+      # The one command line in this file, and the same one a laptop runs. The report
+      # names below are the names this file is told to upload, in both directions.
+      - name: Benchmarks
+        run: >-
+          uv run --locked --extra dev ./scripts/ci/bench.sh --no-install
+          --json-out bench-results.json
+          --markdown-out bench-summary.md
+          --artifact-name bench-results-json
+          --markdown-artifact-name bench-summary-md
+      # The comment body is the markdown the gate generated, tag and all, so the last
+      # comment on the PR is the latest measurement instead of a pile of them. Runs on
+      # a failing gate too - that is the run worth reading - and is skipped under act
+      # with no pull-request event to comment on.
+      - name: Post results comment
+        if: ${{ always() && github.event_name == 'pull_request' && github.event.pull_request.number }}
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ github.token }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-file: bench-summary.md
+          comment-tag: bench-results
+      # `if: !cancelled()` because the results are most interesting on the run that
+      # failed the gate; `if-no-files-found: error` so a gate that wrote nothing is
+      # visibly broken, not mysteriously quiet.
+      - name: Upload bench-results.json
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-json
+          path: bench-results.json
+          if-no-files-found: error
+      - name: Upload bench-summary.md
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-summary-md
+          path: bench-summary.md
+          if-no-files-found: error

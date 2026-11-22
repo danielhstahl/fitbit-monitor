@@ -144,6 +144,8 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
   watermarks and per-dataset failure are the shape of the importer.
 * [docs/data-policy.md](docs/data-policy.md) - what leaves the machine (the API you
   ask, and one webhook).
+* [docs/ci.md](docs/ci.md) - the two gates, what each one stops, the artifacts they
+  write, and the one explicit command that refreshes the benchmark baseline.
 
 ## Development
 
@@ -171,7 +173,7 @@ anywhere else in this repository (not in `.github/workflows/*.yml`, not in a Mak
 ./scripts/ci/lint.sh --no-install         # typecheck.sh, then ruff, byte-compile, YAML, shell
 ./scripts/ci/typecheck.sh --no-install    # mypy alone
 ./scripts/ci/coverage.sh --no-install     # unittest + pytest, then the floors; prints `coverage: NN.N%`
-./scripts/ci/benchmarks.sh --no-install   # compare against benchmarks/baseline.json
+./scripts/ci/bench.sh --no-install     # compare against benchmarks/baseline.json
 ./scripts/ci/post_commit.sh --quick       # skip the benchmark
 ```
 
@@ -192,15 +194,22 @@ Python. Dev dependencies (`.[dev]`): pytest, pytest-cov, coverage, mypy, ruff, p
 
 The CI gates live in `scripts/ci/*.sh` and the workflows only call them
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml),
-[`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml)), so a laptop
+[`.github/workflows/bench.yml`](.github/workflows/bench.yml)), so a laptop
 and a runner fail the same way. The coverage gate ends by printing one machine-readable
 line - `coverage: 92.1%` - and a line per package, and fails below any floor committed
 in `pyproject.toml`: `[tool.coverage.report] fail_under` for the whole tree and
 `[tool.fitbit_monitor.coverage]` for each directory under `src/fitbit_monitor`. It
-writes `coverage.xml` and `coverage.json`, both uploaded as artifacts. The jobs need no
-secrets and no network beyond the package index, so they run under `act`
+writes `coverage.xml` and `coverage.json`, both uploaded as artifacts. The benchmark
+gate compares the five cases in `scripts/bench/bench_plugin_system.py` with
+`benchmarks/baseline.json`, fails a case more than 15% past it, and writes
+`bench-results.json` (case, mean, stddev, iterations, environment) plus
+`bench-summary.md` - the markdown the pull request is commented with, so no arithmetic
+lives in the YAML. Both jobs need no secrets and no network beyond the package index, so
+they run under `act`
 (`act -j coverage --artifact-server-path /tmp/artifacts`) exactly as they run on GitHub;
-without a container runtime, `./scripts/ci/post_commit.sh` runs the same gates.
+without a container runtime, `./scripts/ci/post_commit.sh` runs the same gates. The
+full story, including how to re-record the baseline without letting a run re-baseline
+its own regression away, is [docs/ci.md](docs/ci.md).
 
 Things the tests hold to, worth knowing before you change them:
 
@@ -211,13 +220,16 @@ Things the tests hold to, worth knowing before you change them:
 * `PluginContractTestCase` in `fitbit_monitor.plugins.testing` is the same suite
   third-party plugin authors inherit; the shipped plugin runs against it in CI.
 * `benchmarks/baseline.json` is updated on purpose, with
-  `./scripts/ci/benchmarks.sh --update-baseline`.
+  `./scripts/dev/bench.sh --update-baseline` - CI never passes that flag, so a green
+  benchmark job cannot mean "the baseline moved".
 * `.github/workflows/ci.yml` is checked, not trusted: it must call
   `scripts/ci/coverage.sh` and nothing else, take its interpreter from
   `.python-version`, cache dependencies, upload both coverage reports and carry no
   secrets, and its matrix must match the committed band
   (`tests/test_ci_coverage_gate.py`, which also tests the floor arithmetic against
-  synthetic reports).
+  synthetic reports). `bench.yml` is held to the same standard, and so is the benchmark
+  gate under it - the tolerance, the regression verdict, both reports and the
+  script-generated comment (`tests/test_ci_bench_gate.py`).
 
 ### Layout
 
@@ -232,10 +244,10 @@ src/fitbit_monitor/
     builtin/   resting_trend.py - the reference plugin
   cli/         common.py auth_cmd.py config_cmd.py db_cmd.py store_cmd.py import_cmd.py plugins_cmd.py alerts_cmd.py report_cmd.py doctor_cmd.py dev_cmd.py
   logsafe.py   health-value redaction for everything that reaches a log handler
-docs/          storage.md, plugins.md, data-import.md, data-policy.md, adr/
+docs/          storage.md, plugins.md, data-import.md, data-policy.md, ci.md, adr/
 scripts/       _python.sh - the one interpreter resolver; no script guesses at python3
                dev/{bootstrap,lint,typecheck,test,coverage,bench,check,docs}.sh + record_fixtures.py - what you type;
-               ci/{lint,typecheck,coverage,benchmarks,post_commit}.sh + _coverage_report.py - the gates; bench/, docs/
+               ci/{lint,typecheck,coverage,bench,post_commit}.sh + _coverage_report.py - the gates; bench/, docs/
 tests/         stdlib unittest - runs under pytest or `python -m unittest discover`
 tooling        configured in pyproject.toml, pinned in uv.lock - no config files to drift
 ```

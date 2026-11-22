@@ -7,4 +7,4 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 . scripts/_python.sh
-exec ./scripts/ci/benchmarks.sh --no-install "$@"
+exec ./scripts/ci/bench.sh --no-install "$@"

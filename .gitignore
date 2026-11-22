@@ -21,7 +21,8 @@ venv/
 .coverage
 coverage.xml
 coverage.json
-benchmark-results.json
+bench-results.json
+bench-summary.md
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm

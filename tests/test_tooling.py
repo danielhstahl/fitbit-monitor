@@ -141,6 +141,21 @@ class BenchmarkRecordTest(unittest.TestCase):
             self.assertGreater(value, 0, f"{name}: a baseline of zero can never be beaten")
             self.assertIn(baseline["direction"][name], ("higher", "lower"))
 
+    def test_baseline_records_how_noisy_the_recording_was_and_who_made_it(self) -> None:
+        """A single number per case is not enough to review: how many samples, how wide,
+        and on what machine, or a re-record is unverifiable (ADR-0001 §9 amendment)."""
+        baseline = json.loads((REPO / "benchmarks" / "baseline.json").read_text())
+        self.assertIn("stats", baseline)
+        self.assertEqual(set(baseline["stats"]), set(baseline["cases"]))
+        for name, stats in baseline["stats"].items():
+            for key in ("mean", "stddev", "iterations", "best", "worst"):
+                self.assertIn(key, stats, f"{name}: {key}")
+            self.assertGreaterEqual(stats["iterations"], 1)
+            self.assertGreaterEqual(stats["stddev"], 0.0)
+        self.assertIn("environment", baseline)
+        self.assertRegex(str(baseline["environment"]["python"]), r"^\d+\.\d+")
+        self.assertGreater(baseline["tolerance_percent"], 0.0)
+
 
 class DevEntrypointTest(unittest.TestCase):
     """scripts/dev is the one place a contributor learns the dev commands from."""

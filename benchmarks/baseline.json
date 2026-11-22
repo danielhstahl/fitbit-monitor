@@ -1,25 +1,81 @@
 {
   "cases": {
-    "seed_corpus": 152475.264,
-    "scan_intraday": 580789.948,
-    "downsample_to_days": 439809.185,
-    "plugin_resting_trend": 6.387,
-    "discover_plugins": 0.911
+    "discover_plugins": 1.062,
+    "downsample_to_days": 429761.821,
+    "plugin_resting_trend": 5.873,
+    "scan_intraday": 578638.187,
+    "seed_corpus": 128231.575
   },
-  "units": {
-    "seed_corpus": "rows/sec",
-    "scan_intraday": "points/sec",
-    "downsample_to_days": "points/sec",
-    "plugin_resting_trend": "ms",
-    "discover_plugins": "ms"
-  },
+  "days": 90,
   "direction": {
-    "seed_corpus": "higher",
-    "scan_intraday": "higher",
+    "discover_plugins": "lower",
     "downsample_to_days": "higher",
     "plugin_resting_trend": "lower",
-    "discover_plugins": "lower"
+    "scan_intraday": "higher",
+    "seed_corpus": "higher"
   },
-  "recorded_utc": "2026-11-22T12:58:17+00:00",
-  "days": 90
+  "environment": {
+    "cpu_count": 8,
+    "git": {
+      "branch": "master",
+      "commit": "9d77e48f3cd93bccb8a8b53cce71f482742cd7b1",
+      "dirty": true,
+      "short": "9d77e48"
+    },
+    "hostname": "d9e2dd08881c",
+    "implementation": "CPython",
+    "machine": "aarch64",
+    "memory_gib": 7.7,
+    "os_release": "Debian GNU/Linux 13 (trixie)",
+    "platform": "Linux-7.0.14-linuxkit-aarch64-with-glibc2.41",
+    "python": "3.14.5",
+    "release": "7.0.14-linuxkit",
+    "system": "Linux"
+  },
+  "recorded_utc": "2026-11-22T17:54:55+00:00",
+  "stats": {
+    "discover_plugins": {
+      "best": 1.062,
+      "iterations": 180,
+      "mean": 1.158,
+      "stddev": 0.316,
+      "worst": 4.475
+    },
+    "downsample_to_days": {
+      "best": 429761.821,
+      "iterations": 9,
+      "mean": 419734.392,
+      "stddev": 8963.139,
+      "worst": 399350.922
+    },
+    "plugin_resting_trend": {
+      "best": 5.873,
+      "iterations": 45,
+      "mean": 6.371,
+      "stddev": 1.367,
+      "worst": 15.058
+    },
+    "scan_intraday": {
+      "best": 578638.187,
+      "iterations": 9,
+      "mean": 571993.501,
+      "stddev": 8756.779,
+      "worst": 550564.838
+    },
+    "seed_corpus": {
+      "best": 128231.575,
+      "iterations": 9,
+      "mean": 114403.441,
+      "stddev": 23301.466,
+      "worst": 67423.494
+    }
+  },
+  "tolerance_percent": 15.0,
+  "units": {
+    "discover_plugins": "ms",
+    "downsample_to_days": "points/sec",
+    "plugin_resting_trend": "ms",
+    "scan_intraday": "points/sec",
+    "seed_corpus": "rows/sec"
+  }
 }

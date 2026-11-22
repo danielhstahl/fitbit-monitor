@@ -347,12 +347,20 @@ class CoverageWorkflowTest(unittest.TestCase):
         pinned = (REPO / ".python-version").read_text().split()
         self.assertEqual(sorted(versions), sorted(pinned), ".python-version is the band; the matrix must match it")
 
-    def test_the_benchmark_workflow_delegates_to_its_script_too(self) -> None:
-        doc = yaml.safe_load((WORKFLOWS / "benchmark.yml").read_text())
-        for job in doc["jobs"].values():
-            for step in job["steps"]:
-                if "run" in step and "scripts/" in step["run"]:
-                    self.assertIn("scripts/ci/benchmarks.sh", step["run"])
+    def test_the_benchmark_workflow_is_a_sibling_not_a_stranger(self) -> None:
+        """bench.yml is held to the same standard as ci.yml - by its own test file.
+
+        Asserting it here as well would mean two places deciding what "thin workflow"
+        means; tests/test_ci_bench_gate.py owns that now. What stays here is the one
+        property that is only visible when both files are in the same room.
+        """
+        bench = yaml.safe_load((WORKFLOWS / "bench.yml").read_text())
+        for name, document in (("ci.yml", self.doc), ("bench.yml", bench)):
+            self.assertEqual(document.get("concurrency", {}).get("cancel-in-progress"), True, name)
+            # YAML 1.1 reads the bare key `on` as the boolean True; accept either.
+            triggers = document.get("on", document.get(True))
+            self.assertIsNotNone(triggers, f"{name}: no triggers at all")
+            self.assertIn("pull_request", triggers, name)
 
 
 class CoverageGateScriptTest(unittest.TestCase):
