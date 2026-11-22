@@ -23,7 +23,10 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-cov>=5", "coverage[toml]>=7", "mypy>=1.10", "pyflakes>=3", "pyyaml>=6"]
+# The whole toolchain is one extra, so the two supported install paths -
+# `uv sync --extra dev` (respects uv.lock) and `pip install -e ".[dev]"` (no uv
+# required) - end up with exactly what scripts/ci/*.sh calls. ADR-0001 §3, §10.
+dev = ["pytest>=8", "pytest-cov>=5", "coverage[toml]>=7", "mypy>=1.10", "ruff>=0.6", "pyyaml>=6"]
 
 # The plugin entry-point group named by ADR-0004. Third-party distributions publish
 # classes into this group and `fm plugins list` finds them with no configuration.
@@ -31,6 +34,9 @@ dev = ["pytest>=8", "pytest-cov>=5", "coverage[toml]>=7", "mypy>=1.10", "pyflake
 resting_trend = "fitbit_monitor.plugins.builtin.resting_trend:RestingTrendPlugin"
 
 [project.scripts]
+# Two names, one entrypoint (ADR-0001 §11): `fitbit-monitor` is the name that goes in
+# docs, cron lines and another package's subprocess call; `fm` is what a human types.
+fitbit-monitor = "fitbit_monitor.cli:main"
 fm = "fitbit_monitor.cli:main"
 
 [tool.setuptools.packages.find]
@@ -58,6 +64,22 @@ exclude_lines = [
   "raise NotImplementedError",
   "@overload",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+# Tier 1 of the lint policy in ADR-0001 §10: pyflakes' own rules (F) plus the
+# pycodestyle subset the tree already passes. Tier 2 (I, UP, SIM, B, C4) is a
+# deliberate follow-up commit, not a surprise - see the ADR for the measured cost.
+select = ["E4", "E7", "E9", "W", "F"]
+
+[tool.ruff.format]
+# Chosen but not yet gated: `ruff format --check` joins scripts/ci/lint.sh in the
+# single formatting-only commit named by ADR-0001 §10. The settings live here now so
+# that commit contains reformatting and nothing else.
 
 [tool.mypy]
 python_version = "3.11"

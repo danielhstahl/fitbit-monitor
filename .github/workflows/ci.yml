@@ -3,6 +3,11 @@ name: CI
 # One job per concern that the repository promises to keep green: this one runs the
 # tests and fails under the coverage floor; `benchmark.yml` owns the perf gate.
 # Both delegate to scripts/ci/*.sh so a laptop and the runner agree.
+#
+# Dependency installation goes through uv and uv.lock (`--locked` makes a stale
+# lockfile a CI failure, so the pin committed in git cannot quietly rot). The
+# pip-equivalent path - `pip install -e ".[dev]"` - stays supported for people who
+# refuse a new tool; it is what scripts/ci/*.sh do without --no-install. ADR-0001 §2.
 
 on:
   push:
@@ -19,38 +24,36 @@ concurrency:
 
 jobs:
   lint:
-    name: Type check
+    name: Type check and lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
-      - name: Lint
-        run: ./scripts/ci/lint.sh --no-install
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Lint (mypy, ruff, byte-compile)
+        run: uv run --locked --extra dev --python "3.12" ./scripts/ci/lint.sh --no-install
 
   coverage:
-    name: Tests and coverage (3.11, 3.12, 3.13)
+    name: Tests and coverage (3.11, 3.12, 3.13, 3.14)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
       - name: Tests and coverage gate
-        run: ./scripts/ci/coverage.sh --no-install
+        run: uv run --locked --extra dev --python "${{ matrix.python-version }}" ./scripts/ci/coverage.sh --no-install
       - name: Upload coverage report
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4

@@ -4,8 +4,8 @@ name: Benchmarks
 # (benchmarks/baseline.json) and fails on a regression past the tolerance, so an
 # accidental O(n^2) in the read API or the runner cannot land quietly.
 #
-# Re-record the baseline deliberately:
-#   ./scripts/ci/benchmarks.sh --update-baseline && git add benchmarks/baseline.json
+# Re-record the baseline deliberately (see ADR-0001 §7 for what is measured):
+#   ./scripts/dev/bench.sh --update-baseline && git add benchmarks/baseline.json
 
 on:
   push:
@@ -29,13 +29,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
       - name: Benchmark
         run: |
-          ./scripts/ci/benchmarks.sh --no-install --json > benchmark-results.json
+          uv run --locked --extra dev --python "3.12" ./scripts/ci/benchmarks.sh --no-install --json > benchmark-results.json
           cat benchmark-results.json
       - name: Summary
         if: always()

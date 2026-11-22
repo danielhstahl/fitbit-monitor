@@ -5,8 +5,10 @@ Your Fitbit data, on your machine, watched by plugins you can read.
 The program has three layers, each usable on its own: a **local store** (raw
 payloads plus normalized series in SQLite, with a read API), a **plugin system**
 (the contract, discovery, the runner, and the alert sinks), and the **`fm` command
-line** that ties them together. Nothing in it sends your health data anywhere except
-the alert webhook you configure - see [docs/data-policy.md](docs/data-policy.md).
+line** that ties them together. `fm` is the short alias of `fitbit-monitor`; both are
+installed by this package and run the same code. Nothing in it sends your health data
+anywhere except the alert webhook you configure - see
+[docs/data-policy.md](docs/data-policy.md).
 
 > Status: the store core, the plugin system and the import path (`fm auth`,
 > `fm import`) are implemented, including the shipped `resting_trend` example
@@ -17,8 +19,7 @@ the alert webhook you configure - see [docs/data-policy.md](docs/data-policy.md)
 ## Quickstart
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
+./scripts/dev/bootstrap.sh && . .venv/bin/activate   # uv when present, else venv + pip
 
 fm auth login                       # one-time browser consent; token stays local
 fm import --dry-run                 # what would this fetch, and at what cost
@@ -107,6 +108,9 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
   the UTC convention, verify/backup/export, and retention.
 * [docs/data-import.md](docs/data-import.md) - auth, planning a pull, resuming an
   interrupted one, CSV backfill, and what each dataset means.
+* [docs/adr/0001-implementation-stack.md](docs/adr/0001-implementation-stack.md) - the
+  stack, once: Python floor, uv, `src/` layout, SQLite, the test/coverage/benchmark
+  tools, and why the CLI is argparse.
 * [docs/adr/0003-storage-model.md](docs/adr/0003-storage-model.md) - why raw payloads
   are the record, one `series` table plus typed views, and what makes an overlapping
   import idempotent.
@@ -119,15 +123,42 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
 
 ## Development
 
+Install once, then one entrypoint per action. `scripts/dev/*` is what a contributor
+types; `scripts/ci/*` is the gate underneath it, which the workflows call with
+`--no-install` so a laptop and a runner fail the same way (ADR-0001 §3, §12).
+
 ```bash
-./scripts/ci/lint.sh          # mypy + byte-compile + shell syntax
-./scripts/ci/coverage.sh      # unittest + pytest + coverage floor
-./scripts/ci/benchmarks.sh    # plugin system vs benchmarks/baseline.json
-./scripts/ci/post_commit.sh   # all three, the way CI runs them after a commit
+./scripts/dev/bootstrap.sh      # create .venv (uv when present, else venv + pip)
+./scripts/dev/lint.sh           # mypy + ruff + byte-compile + workflow/shell parse
+./scripts/dev/test.sh           # unittest + pytest + the coverage floor
+./scripts/dev/bench.sh          # plugin system vs benchmarks/baseline.json
+./scripts/dev/check.sh          # all three - what CI runs after every commit
+./scripts/dev/docs.sh           # regenerate the API reference block in docs/plugins.md
+python scripts/dev/record_fixtures.py --check   # recorded API fixtures are current
 ```
 
-Python 3.11+. Runtime dependencies: none - stdlib only, so a plugin author needs
-nothing but Python. Dev dependencies (`.[dev]`): pytest, coverage, mypy.
+The gates underneath take the same arguments and are safe to call directly:
+
+```bash
+./scripts/ci/lint.sh --no-install         # mypy, ruff, byte-compile, YAML, shell
+./scripts/ci/coverage.sh --no-install     # unittest + pytest + coverage floor
+./scripts/ci/benchmarks.sh --no-install   # compare against benchmarks/baseline.json
+./scripts/ci/post_commit.sh --quick       # skip the benchmark
+```
+
+**Without uv**, `pip` installs the same toolchain - `uv sync --extra dev` is the fast
+path and `uv.lock` is the pin, but nothing in the repository depends on uv being
+installed:
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+Python 3.11+ (`.python-version` is the interpreter uv uses for the dev environment;
+CI runs 3.11, 3.12, 3.13 and 3.14). Runtime dependencies: none - stdlib only, so a
+plugin author needs nothing but Python. Dev dependencies (`.[dev]`): pytest,
+pytest-cov, coverage, mypy, ruff, pyyaml.
 
 The CI gates live in `scripts/ci/*.sh` and the workflows only call them
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml),
@@ -159,6 +190,8 @@ src/fitbit_monitor/
   cli/         common.py auth_cmd.py config_cmd.py db_cmd.py store_cmd.py import_cmd.py plugins_cmd.py alerts_cmd.py dev_cmd.py
   logsafe.py   health-value redaction for everything that reaches a log handler
 docs/          storage.md, plugins.md, data-import.md, data-policy.md, adr/
-scripts/       ci/{lint,coverage,benchmarks,post_commit}.sh, bench/, dev/, docs/
+scripts/       dev/{bootstrap,lint,test,bench,check,docs}.sh + record_fixtures.py - what you type;
+               ci/{lint,coverage,benchmarks,post_commit}.sh - the gates; bench/, docs/
 tests/         stdlib unittest - runs under pytest or `python -m unittest discover`
+tooling        configured in pyproject.toml, pinned in uv.lock - no config files to drift
 ```

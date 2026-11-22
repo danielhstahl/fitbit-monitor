@@ -409,7 +409,10 @@ class ModuleInvocationTest(CliTestCase):
         import tomllib
 
         raw = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
-        self.assertEqual(raw["project"]["scripts"]["fm"], "fitbit_monitor.cli:main")
+        scripts = raw["project"]["scripts"]
+        # Two names, one entrypoint - ADR-0001 §11.
+        self.assertEqual(scripts["fm"], "fitbit_monitor.cli:main")
+        self.assertEqual(scripts["fitbit-monitor"], "fitbit_monitor.cli:main")
         group = raw["project"]["entry-points"]["fitbit_monitor.plugins"]
         self.assertEqual(group["resting_trend"], "fitbit_monitor.plugins.builtin.resting_trend:RestingTrendPlugin")
 

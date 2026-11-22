@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Static checks: type checking and byte-compilation of everything we ship.
+# Static checks: type checking, linting, and byte-compilation of everything we ship.
 #
 # mypy is the contract's first line of defence - the plugin models and the context
-# are typed on purpose, so a plugin author's IDE sees what CI sees.
+# are typed on purpose, so a plugin author's IDE sees what CI sees. ruff is the linter
+# (ADR-0001 §10): its F rules are pyflakes' rules, so this gate is pyflakes plus more.
 #
 # Usage: scripts/ci/lint.sh [--no-install]
 set -euo pipefail
@@ -19,8 +20,13 @@ echo "== mypy"
 "$PYTHON" -m mypy
 
 echo
-echo "== pyflakes (unused imports, undefined names, f-strings without placeholders)"
-"$PYTHON" -m pyflakes src scripts tests
+if ! "$PYTHON" -c "import ruff" 2>/dev/null; then
+    echo "error: ruff is not installed in $PYTHON" >&2
+    echo "  fix: ./scripts/dev/bootstrap.sh   (or: uv sync --extra dev)" >&2
+    exit 2
+fi
+echo "== ruff check (lint tier 1 - see [tool.ruff.lint] in pyproject.toml)"
+"$PYTHON" -m ruff check src scripts tests
 
 echo
 echo "== byte-compile package, scripts and tests"
@@ -49,7 +55,7 @@ PYEOF
 
 echo
 echo "== shell scripts parse"
-for script in scripts/ci/*.sh; do
+for script in scripts/*/*.sh; do
     bash -n "$script"
     echo "ok  $script"
 done
