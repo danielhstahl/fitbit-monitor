@@ -38,7 +38,7 @@ redirect_port = {port}
 scopes = [{scopes}]
 
 # How an ad-hoc import behaves. Every key here has a default; they are listed so the
-# knobs are visible - see docs/importing.md. `timezone` is the account timezone: the
+# knobs are visible - see docs/data-import.md. `timezone` is the account timezone: the
 # API and the export CSVs both timestamp in it without saying so.
 [import]
 timezone = "UTC"
@@ -89,7 +89,7 @@ def render_starter(session: Session) -> str:
     return STARTER.format(
         store=session.store_path,
         redirect=api.redirect_uri,
-        redirect_port=api.redirect_port,
+        port=api.redirect_port,
         scopes=", ".join(f'"{s}"' for s in (api.scopes or ALL_SCOPES)),
     )
 

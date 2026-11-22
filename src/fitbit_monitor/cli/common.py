@@ -62,8 +62,9 @@ class Session:
         """The one API client a command uses, wired to this session's paths.
 
         ``fixtures`` (or ``FM_FIXTURES``) replays recorded responses from a directory
-        instead of calling the network - the same escape hatch ``fm auth login
-        --fixtures`` uses, and what lets a rehearsal (or a test run) happen offline.
+        instead of calling the network - what lets a rehearsal, and this project's own
+        test suite, happen offline. ``fm auth login --manual`` covers the headless case
+        of the login flow.
         """
         if transport is None:
             directory = fixtures or os.environ.get("FM_FIXTURES")

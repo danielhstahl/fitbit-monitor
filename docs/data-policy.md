@@ -27,9 +27,10 @@ Nothing you did not choose, and only while an import is running:
 | `fm auth login` / token refresh | your PKCE verifier and authorization code, then the refresh token | to get and renew a token; to `auth.fitbit.com` |
 | `fm import` | `Authorization: Bearer <token>`, the date range you asked for, and an `If-None-Match` ETag when we have one | to fetch the days you named; to `[api] base_url` (default `https://api.fitbit.com`) |
 
-Plain HTTP is refused for the API and for the webhook - `https` or the loopback
-exception, never a plaintext internet hop. No query, metric or stored value is ever
-sent *out* to Fitbit; the calls are reads.
+Plain HTTP is refused for the webhook - `https` or the loopback exception, never a
+plaintext internet hop. The API endpoints default to `https` and only change if you
+edit `[api]` yourself (a loopback URL there is how the login flow is tested). No
+query, metric or stored value is ever sent *out* to Fitbit; the calls are reads.
 
 Nothing else in the program opens a socket. Not the store, not the plugin runner,
 not the alert history, not the benchmarks. An import is the only thing that

@@ -105,6 +105,30 @@ class ImportCliTest(CliTestCase):
         self.assertIn("fm auth login", text)
         self.assertFalse(self.store_path.exists())
 
+    def test_the_table_forms_of_the_reporting_commands(self) -> None:
+        self.import_window(expect=EXIT_OK)
+        _code, text = self.fm("import", "report", expect=EXIT_OK)
+        self.assertIn("report:", text)
+        self.assertIn("watermark", text)
+        for dataset in EXPECTED_ROWS:
+            self.assertIn(dataset, text)
+        _code, text = self.fm("import", "history", expect=EXIT_OK)
+        self.assertIn("DATASET", text)
+        self.assertEqual(sum(1 for line in text.splitlines() if " api " in line), 5, "one line per dataset")
+        _code, text = self.fm("import", "watermarks", expect=EXIT_OK)
+        self.assertIn("LAST DAY", text)
+        self.assertIn(UNTIL, text)
+
+    def test_a_big_pull_is_confirmed_or_said_to_be_unattended(self) -> None:
+        config = self.home / "config" / "fitbit-monitor" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("[import]\nconfirm_above_requests = 40\n")
+        # No TTY under the test runner: the run proceeds and says it is unattended.
+        _code, text = self.import_window()
+        self.assertIn("running unattended", text)
+        _code, text = self.import_window("--yes")
+        self.assertNotIn("running unattended", text)
+
     # --- afterwards ---------------------------------------------------------
     def test_history_watermarks_and_report(self) -> None:
         self.import_window(expect=EXIT_OK)
