@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import UsageError
 
@@ -77,6 +78,70 @@ def _day_start(day: date, *, end_of_day: bool) -> datetime:
     if end_of_day:
         return datetime(day.year, day.month, day.day, tzinfo=UTC) + timedelta(days=1)
     return datetime(day.year, day.month, day.day, tzinfo=UTC)
+
+
+def resolve_timezone(name: str) -> tzinfo:
+    """Named timezone, with a message that names the setting to fix."""
+    if not name or name.lower() in ("utc", "default"):
+        return UTC
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise UsageError(
+            f"unknown timezone {name!r}",
+            hint="[import] timezone in config.toml, e.g. \"Europe/Berlin\" or \"UTC\"",
+        ) from exc
+
+
+def parse_timestamp(text: str, *, tz_name: str = "UTC", field: str = "timestamp", fmt: str | None = None) -> datetime:
+    """Parse a timestamp that carries **no offset** into aware UTC.
+
+    Neither the Fitbit API's ``dateTime`` strings nor the export CSVs say which
+    timezone they are in - they are in the account's timezone. ``[import] timezone``
+    is the one place that states what they mean, so the guess is at least written
+    down. A string that *does* carry an offset wins over the setting.
+    """
+    raw = str(text).strip()
+    if not raw:
+        raise UsageError(f"{field}: empty timestamp")
+    parsed: datetime | None = None
+    if fmt:
+        try:
+            parsed = datetime.strptime(raw, fmt)
+        except ValueError:
+            parsed = None
+    if parsed is None:
+        try:
+            parsed = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+        except ValueError:
+            try:
+                parsed = datetime.strptime(raw, "%Y/%m/%d %H:%M:%S")
+            except ValueError:
+                try:
+                    parsed = datetime.strptime(raw, "%m/%d/%Y %H:%M")
+                except ValueError:
+                    raise UsageError(f"{field}: cannot parse timestamp {raw!r}") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=resolve_timezone(tz_name))
+    return ensure_utc(parsed, field=field)
+
+
+def parse_date(text: str, *, field: str = "date") -> date:
+    """Parse ``YYYY-MM-DD`` (or ``YYYY/MM/DD``) as a plain calendar date."""
+    raw = str(text).strip()
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(raw, "%Y/%m/%d").date()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(raw, "%m/%d/%Y").date()
+    except ValueError:
+        pass
+    raise UsageError(f"{field}: cannot parse date {raw!r}", hint="expected YYYY-MM-DD")
 
 
 @dataclass(frozen=True)

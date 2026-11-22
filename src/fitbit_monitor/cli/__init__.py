@@ -11,7 +11,10 @@ Exit codes (the same for every subcommand):
 0    success - including "ran and found nothing"
 1    a plugin errored, or an operation failed
 2    bad arguments, or config that does not parse
+3    an import partially failed (some datasets landed, some did not)
 4    the local store is missing or unusable
+5    an import landed with warnings (quarantined payloads, bad rows)
+130  an import was interrupted; what was fetched is stored
 ===  ==========================================
 """
 
@@ -21,7 +24,7 @@ import argparse
 import sys
 from typing import Sequence
 
-from . import alerts_cmd, dev_cmd, plugins_cmd
+from . import alerts_cmd, auth_cmd, config_cmd, dev_cmd, import_cmd, plugins_cmd
 from .common import (
     EXIT_ERROR,
     EXIT_NO_STORE,
@@ -42,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(parser)
     parser.add_argument("--version", action="store_true", help="print the package version and exit")
     sub = parser.add_subparsers(dest="command", required=False)
+    config_cmd.register(sub)
+    auth_cmd.register(sub)
+    import_cmd.register(sub)
     plugins_cmd.register(sub)
     alerts_cmd.register(sub)
     dev_cmd.register(sub)
@@ -50,13 +56,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 _EPILOG = """\
 examples:
-  fm dev seed --days 45                     sample data to try things on
-  fm plugins list                           what is installed (and what is broken)
-  fm plugins run --all --since 30d          compute metrics, deliver alerts
-  fm alerts list --since 7d                what has been flagged
-  fm plugin new resting_hrv --dir ~/plugins scaffold a plugin
+  fm config init                              write the starter config.toml
+  fm auth login                               authorize fm against your account
+  fm import --dry-run                         what an import would cost, before spending it
+  fm import --since 7d                        pull the last week (or: since the last import)
+  fm import --source csv --path export.zip    backfill from the Fitbit web export
+  fm plugins list                             what is installed (and what is broken)
+  fm plugins run --all --since 30d            compute metrics, deliver alerts
+  fm alerts list --since 7d                   what has been flagged
+  fm plugin new resting_hrv --dir ~/plugins   scaffold a plugin
 
-Plugin system docs: docs/plugins.md, and `fm plugins show NAME` for any plugin's options.
+Docs: docs/quickstart.md (first auth, first import), docs/importing.md (backfill,
+overlaps, rate limits), docs/plugins.md (writing a plugin).
 """
 
 
@@ -87,6 +98,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(func(args, session))
     except SystemExit as exc:  # argparse --help / --error paths
         return int(exc.code or 0)
+    except KeyboardInterrupt:
+        print("interrupted: anything already committed is stored", file=sys.stderr)
+        return 130
     except Exception as exc:  # noqa: BLE001 - CLI boundary: report, do not traceback
         from ..errors import FmError
 

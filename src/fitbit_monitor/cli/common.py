@@ -10,10 +10,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from ..api.auth import CredentialStore
+from ..api.client import FitbitClient
+from ..api.http import ReplayTransport, load_fixtures
 from ..config import AppConfig
 from ..errors import StoreUnavailableError, UsageError
 from ..paths import Paths
@@ -41,6 +45,37 @@ class Session:
     @property
     def store_path(self) -> Path:
         return self.config.store_path or self.paths.store
+
+    @property
+    def import_settings(self):
+        return self.config.import_
+
+    @property
+    def api_settings(self):
+        return self.config.api
+
+    def credentials(self) -> CredentialStore:
+        """Where the OAuth tokens live: ``[api] credentials_path`` or the data dir."""
+        return CredentialStore(self.config.api.credentials_path or self.paths.credentials)
+
+    def api_client(self, transport=None, fixtures: Path | str | None = None) -> FitbitClient:
+        """The one API client a command uses, wired to this session's paths.
+
+        ``fixtures`` (or ``FM_FIXTURES``) replays recorded responses from a directory
+        instead of calling the network - the same escape hatch ``fm auth login
+        --fixtures`` uses, and what lets a rehearsal (or a test run) happen offline.
+        """
+        if transport is None:
+            directory = fixtures or os.environ.get("FM_FIXTURES")
+            if directory:
+                transport = ReplayTransport(load_fixtures(Path(directory).expanduser()))
+        return FitbitClient(
+            self.config.api,
+            self.credentials(),
+            import_settings=self.config.import_,
+            transport=transport,
+            etag_cache_path=self.paths.etag_cache,
+        )
 
     def read_store(self) -> ReadOnlyStore:
         path = self.store_path
@@ -101,7 +136,7 @@ def is_day_only(text: str) -> bool:
 
 
 # --- presentation helpers ----------------------------------------------------
-def render_table(headers: Sequence[str], rows: Iterable[Sequence[str]]) -> str:
+def render_table(headers: Sequence[str], rows: Iterable[Sequence[object]]) -> str:
     cells = [[str(c) for c in row] for row in rows]
     widths = [len(h) for h in headers]
     for row in cells:

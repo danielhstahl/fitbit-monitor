@@ -1,0 +1,432 @@
+"""OAuth2 + PKCE against Fitbit, and the file the tokens live in.
+
+Fitbit's desktop-app flow is authorization-code + PKCE with a loopback redirect: the
+browser does the consent, the code comes back to ``http://localhost:<port>/``, and
+the token exchange is a plain form POST. Nothing here needs a public URL, a
+third-party service, or a browser on a machine that also has the store.
+
+Three rules this module holds to:
+
+* the token file is written ``0600`` and contains nothing but the tokens and the
+  scopes they carry (see :mod:`fitbit_monitor.paths`);
+* the *client* secret comes from ``config.toml`` and is never written anywhere by
+  this program;
+* every error a user has to act on names ``fm auth login`` in its hint.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import http.server
+import json
+import os
+import secrets
+import threading
+import urllib.parse
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+from ..errors import UsageError
+from ..timeutil import ensure_utc, utcnow
+from .errors import CredentialsExpiredError, NotAuthenticatedError
+from .http import Response
+
+REDIRECT_PATH = "/"
+REFRESH_SKEW = timedelta(minutes=5)
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def pkce_challenge(verifier: str) -> str:
+    """S256 PKCE code challenge for ``verifier`` (RFC 7636 appendix A)."""
+    return _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
+
+
+@dataclass(frozen=True)
+class PkceFlow:
+    """One authorization attempt: the verifier, its challenge, and the CSRF state."""
+
+    code_verifier: str
+    state: str
+
+    @classmethod
+    def new(cls) -> "PkceFlow":
+        return cls(code_verifier=secrets.token_urlsafe(48), state=secrets.token_urlsafe(24))
+
+    @property
+    def code_challenge(self) -> str:
+        return pkce_challenge(self.code_verifier)
+
+    def authorize_url(
+        self,
+        *,
+        client_id: str,
+        redirect_uri: str,
+        scopes: tuple[str, ...],
+        authorize_url: str = "https://www.fitbit.com/oauth2/authorize",
+    ) -> str:
+        """The URL to open in a browser. ``scope`` is space-delimited, per the spec."""
+        if not scopes:
+            raise UsageError("no scopes requested", hint="set [api] scopes in config.toml")
+        query = urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "scope": " ".join(scopes),
+                "state": self.state,
+                "code_challenge": self.code_challenge,
+                "code_challenge_method": "S256",
+            }
+        )
+        return f"{authorize_url}?{query}"
+
+
+@dataclass(frozen=True)
+class TokenSet:
+    """An access token, its refresh token, and what they let this program do."""
+
+    access_token: str
+    refresh_token: str
+    expires_at: datetime
+    scopes: tuple[str, ...] = ()
+    token_type: str = "Bearer"
+    user_id: str = "-"
+    obtained_at: datetime = field(default_factory=utcnow)
+
+    def seconds_left(self, now: datetime | None = None) -> float:
+        return (self.expires_at - ensure_utc(now or utcnow(), field="now")).total_seconds()
+
+    def needs_refresh(self, now: datetime | None = None) -> bool:
+        """True when the token is expired, or about to be within the skew window."""
+        return self.seconds_left(now) <= REFRESH_SKEW.total_seconds()
+
+    def authorization_header(self) -> dict[str, str]:
+        return {"Authorization": f"{self.token_type} {self.access_token}"}
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token,
+            "token_type": self.token_type,
+            "expires_at": self.expires_at.isoformat(),
+            "obtained_at": self.obtained_at.isoformat(),
+            "scopes": list(self.scopes),
+            "user_id": self.user_id,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "TokenSet":
+        missing = [key for key in ("access_token", "expires_at") if not raw.get(key)]
+        if missing:
+            raise NotAuthenticatedError(
+                f"credential file is missing {', '.join(missing)}",
+                hint="run `fm auth login`",
+            )
+        return cls(
+            access_token=str(raw["access_token"]),
+            refresh_token=str(raw["refresh_token"]),
+            expires_at=datetime.fromisoformat(str(raw["expires_at"])),
+            scopes=tuple(str(s) for s in raw.get("scopes") or ()),
+            token_type=str(raw.get("token_type") or "Bearer"),
+            user_id=str(raw.get("user_id") or "-"),
+            obtained_at=datetime.fromisoformat(str(raw["obtained_at"])) if raw.get("obtained_at") else utcnow(),
+        )
+
+    def public(self) -> dict[str, Any]:
+        """The status view: everything useful, no secrets."""
+        return {
+            "user_id": self.user_id,
+            "scopes": list(self.scopes),
+            "token_type": self.token_type,
+            "expires_at": self.expires_at.isoformat(),
+            "seconds_left": round(self.seconds_left()),
+            "expired": self.seconds_left() <= 0,
+            "needs_refresh": self.needs_refresh(),
+        }
+
+
+class CredentialStore:
+    """The token file: ``0600``, atomic replace, and never inside the database.
+
+    The store is a copyable, prunable artifact; the tokens are not. Keeping them in
+    a separate file is what makes ``fm store export`` and "email me a backup" safe.
+    """
+
+    def __init__(self, path: Path | str) -> None:
+        self.path = Path(path)
+
+    @property
+    def exists(self) -> bool:
+        return self.path.exists()
+
+    def load(self) -> TokenSet:
+        if not self.path.exists():
+            raise NotAuthenticatedError(f"no credentials at {self.path}")
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise NotAuthenticatedError(f"cannot read credentials at {self.path}: {exc}") from exc
+        return TokenSet.from_dict(raw)
+
+    def load_or_none(self) -> TokenSet | None:
+        try:
+            return self.load()
+        except NotAuthenticatedError:
+            return None
+
+    def save(self, tokens: TokenSet) -> Path:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.path.parent, 0o700)
+        temp = self.path.with_suffix(self.path.suffix + ".tmp")
+        temp.write_text(json.dumps(tokens.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(temp, 0o600)
+        os.replace(temp, self.path)
+        os.chmod(self.path, 0o600)
+        return self.path
+
+    def delete(self) -> bool:
+        if not self.path.exists():
+            return False
+        self.path.unlink()
+        return True
+
+
+def _basic_auth(client_id: str, client_secret: str) -> str:
+    return "Basic " + base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+
+
+def _post_token(
+    transport: Any,
+    *,
+    token_url: str,
+    client_id: str,
+    client_secret: str,
+    fields: Mapping[str, str],
+    now: datetime,
+) -> TokenSet:
+    body = urllib.parse.urlencode(fields).encode("ascii")
+    response: Response = transport.request(
+        "POST",
+        token_url,
+        {
+            "Authorization": _basic_auth(client_id, client_secret),
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        body,
+    )
+    if not response.ok:
+        detail = _error_detail(response)
+        raise CredentialsExpiredError(f"the token endpoint refused the request: HTTP {response.status} {detail}")
+    payload = response.json()
+    if not isinstance(payload, dict) or not payload.get("access_token"):
+        raise CredentialsExpiredError("the token endpoint returned no access token")
+    expires_in = float(payload.get("expires_in") or 28800)
+    scopes = payload.get("scope") or ""
+    return TokenSet(
+        access_token=str(payload["access_token"]),
+        refresh_token=str(payload.get("refresh_token") or ""),
+        expires_at=ensure_utc(now) + timedelta(seconds=expires_in),
+        scopes=tuple(str(s) for s in (scopes.split() if isinstance(scopes, str) else list(scopes))),
+        token_type=str(payload.get("token_type") or "Bearer"),
+        user_id=str(payload.get("user_id") or "-"),
+        obtained_at=ensure_utc(now),
+    )
+
+
+def _error_detail(response: Response) -> str:
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001 - a body we cannot parse is not worth a traceback
+        return response.text[:200]
+    if isinstance(payload, dict):
+        errors = payload.get("errors")
+        if errors:
+            return json.dumps(errors)[:200]
+        return str(payload)[:200]
+    return ""
+
+
+def exchange_code(
+    transport: Any,
+    *,
+    token_url: str,
+    client_id: str,
+    client_secret: str,
+    code: str,
+    redirect_uri: str,
+    code_verifier: str,
+    now: datetime | None = None,
+) -> TokenSet:
+    """Swap an authorization code (and the PKCE verifier) for tokens."""
+    return _post_token(
+        transport,
+        token_url=token_url,
+        client_id=client_id,
+        client_secret=client_secret,
+        fields={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        },
+        now=now or utcnow(),
+    )
+
+
+def refresh(
+    transport: Any,
+    *,
+    token_url: str,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    now: datetime | None = None,
+) -> TokenSet:
+    """Refresh an access token. Fitbit rotates refresh tokens, so the result replaces
+    the whole :class:`TokenSet`, not just the access token."""
+    if not refresh_token:
+        raise CredentialsExpiredError("the stored credentials have no refresh token")
+    return _post_token(
+        transport,
+        token_url=token_url,
+        client_id=client_id,
+        client_secret=client_secret,
+        fields={"grant_type": "refresh_token", "refresh_token": refresh_token},
+        now=now or utcnow(),
+    )
+
+
+class _CallbackHandler(http.server.BaseHTTPRequestHandler):
+    """Captures ``?code=`` (or ``?error=``) once, then hands the browser a stub page."""
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+        parsed = urllib.parse.urlsplit(self.path)
+        params = dict(urllib.parse.parse_qsl(parsed.query))
+        self.server.params = params  # type: ignore[attr-defined]
+        body = (
+            b"<html><body><h2>fitbit-monitor</h2><p>Captured the authorization "
+            b"response - you can close this tab and return to the terminal.</p></body></html>"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args) -> None:  # silence the stdlib's stderr chatter
+        return
+
+
+class LoopbackCallback:
+    """A one-shot localhost HTTP server that waits for the redirect.
+
+    ``port`` should match ``[api] redirect_port``, because Fitbit compares the
+    redirect URI exactly; pass 0 in tests to let the OS pick one.
+    """
+
+    def __init__(self, *, host: str = "127.0.0.1", port: int = 0, timeout: float = 300.0) -> None:
+        self.host = host
+        self.requested_port = port
+        self.timeout: float = timeout
+        self.port = port
+
+    def redirect_uri(self, host: str = "localhost") -> str:
+        return f"http://{host}:{self.port}{REDIRECT_PATH}"
+
+    def wait(self) -> dict[str, str]:
+        """Block until the redirect lands. Raises :class:`UsageError` on timeout/error."""
+        server = _CallbackWait((self.host, self.requested_port), _CallbackHandler, timeout=self.timeout)
+        self.port = server.server_address[1]
+        try:
+            params = server.wait_for_params()
+        finally:
+            server.shutdown_server()
+        if "error" in params:
+            raise UsageError(
+                f"the authorization was refused: {params['error']}",
+                hint=f"check the redirect URI registered for the app is exactly {self.redirect_uri()}",
+            )
+        if "code" not in params:
+            raise UsageError("the authorization redirect carried no code")
+        return params
+
+
+class _CallbackWait(http.server.ThreadingHTTPServer):
+    """A HTTPServer that serves until one request has landed (or the clock runs out)."""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, address, handler, *, timeout: float) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(address, handler)
+        self.params: dict[str, str] | None = None
+        self.timeout: float = timeout
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self.serve_forever, daemon=True)
+        self._thread.start()
+
+    def wait_for_params(self) -> dict[str, str]:
+        """Block for the redirect: the request lands, or ``timeout`` seconds pass."""
+        waited = 0.0
+        while self.params is None and waited < self.timeout:
+            self._done.wait(0.02)
+            waited += 0.02
+        if self.params is None:
+            raise UsageError(
+                "timed out waiting for the browser redirect",
+                hint="for a machine with no browser, use `fm auth login --manual <code>`",
+            )
+        return self.params
+
+    def shutdown_server(self) -> None:
+        self.shutdown()
+        self.server_close()
+        self._thread.join(timeout=5)
+
+    def finish_request(self, request, client_address) -> None:  # type: ignore[no-untyped-def]
+        super().finish_request(request, client_address)
+        self._done.set()
+
+
+def fetch_redirect_manually(prompt: str, input_fn: Callable[[str], str] = input) -> str:
+    """The no-browser path: paste the ``code`` from the redirect URL by hand."""
+    raw = input_fn(prompt).strip()
+    if not raw:
+        raise UsageError("no authorization code entered")
+    if "code=" in raw:
+        parsed = urllib.parse.urlsplit(raw)
+        params = dict(urllib.parse.parse_qsl(parsed.query))
+        if "code" in params:
+            return params["code"]
+        raise UsageError("that URL has no code= parameter", hint="paste the whole redirect URL, or just the code")
+    return raw
+
+
+def open_browser(url: str) -> bool:
+    """Best-effort browser open; a headless box is normal here, so failure is quiet."""
+    import webbrowser
+
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:  # noqa: BLE001 - no browser, no DISPLAY, no XDG session
+        return False
+
+
+__all__ = [
+    "CredentialStore",
+    "LoopbackCallback",
+    "PkceFlow",
+    "TokenSet",
+    "exchange_code",
+    "fetch_redirect_manually",
+    "open_browser",
+    "pkce_challenge",
+    "refresh",
+]

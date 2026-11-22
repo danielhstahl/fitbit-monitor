@@ -1,7 +1,9 @@
 """Where fitbit-monitor keeps its files (XDG-based, every one overridable).
 
 The plugin system needs three of these: the config file (per-plugin options), the
-store (what a plugin reads), and the data dir (where alert history is appended).
+store (what a plugin reads), and the data dir (where alert history and import
+reports are written). The OAuth token file lives in the data dir too, so "where does
+my token live" has one answer: :func:`credentials_path`, mode 0600.
 Resolution order is documented once here and honoured everywhere:
 
 1. an explicit CLI flag (``--config`` / ``--data-dir`` / ``--db``),
@@ -22,6 +24,9 @@ APP_DIR = "fitbit-monitor"
 CONFIG_FILENAME = "config.toml"
 STORE_FILENAME = "store.sqlite3"
 ALERT_LOG_FILENAME = "alerts.jsonl"
+CREDENTIALS_FILENAME = "credentials.json"
+IMPORTS_DIRNAME = "imports"
+ETAG_CACHE_FILENAME = "http-etag-cache.json"
 
 
 def config_home() -> Path:
@@ -60,6 +65,20 @@ def alert_log_path(data_dir: Path) -> Path:
     return data_dir / ALERT_LOG_FILENAME
 
 
+def credentials_path(data_dir: Path) -> Path:
+    """Where the OAuth tokens live: written 0600, and never inside the store."""
+    return data_dir / CREDENTIALS_FILENAME
+
+
+def imports_dir(data_dir: Path) -> Path:
+    """Where the JSON report of each import run is written."""
+    return data_dir / IMPORTS_DIRNAME
+
+
+def etag_cache_path(data_dir: Path) -> Path:
+    return data_dir / ETAG_CACHE_FILENAME
+
+
 @dataclass(frozen=True)
 class Paths:
     """Resolved, request-scoped view of the three interesting paths."""
@@ -71,6 +90,23 @@ class Paths:
     def ensure_data_dir(self) -> Path:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         return self.data_dir
+
+    def ensure_imports_dir(self) -> Path:
+        directory = imports_dir(self.data_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    @property
+    def credentials(self) -> Path:
+        return credentials_path(self.data_dir)
+
+    @property
+    def imports(self) -> Path:
+        return imports_dir(self.data_dir)
+
+    @property
+    def etag_cache(self) -> Path:
+        return etag_cache_path(self.data_dir)
 
     @classmethod
     def resolve(

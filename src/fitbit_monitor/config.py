@@ -24,6 +24,17 @@ Layout of the file::
     [alerts.webhook]
     url = "https://hooks.example/…"
     enabled = false
+
+    [api]
+    client_id = ""
+    redirect_port = 55413
+    scopes = ["profile", "activity", "sleep", "heart_rate", "heart_profile", "spo2"]
+
+    [import]
+    timezone = "UTC"
+    recent_days = 7
+    [import.chunk_days]
+    hrv = 7
 """
 
 from __future__ import annotations
@@ -189,6 +200,76 @@ class WebhookSettings:
 
 
 @dataclass(frozen=True)
+class ApiSettings:
+    """``[api]`` - how ``fm`` talks to the Fitbit web API.
+
+    ``client_id``/``client_secret`` are what you get when you register the app;
+    ``redirect_port`` has to match the redirect URI you registered *exactly*, which
+    is why it is a setting rather than a constant. ``scopes`` left unset means
+    "everything this build knows how to import".
+    """
+
+    base_url: str = "https://api.fitbit.com"
+    authorize_url: str = "https://www.fitbit.com/oauth2/authorize"
+    token_url: str = "https://api.fitbit.com/oauth2/token"
+    client_id: str = ""
+    client_secret: str = ""
+    redirect_host: str = "localhost"
+    redirect_port: int = 55413
+    scopes: tuple[str, ...] = ()
+    user_id: str = "-"
+    timeout: float = 30.0
+    retries: int = 3
+    credentials_path: Path | None = None
+
+    @property
+    def redirect_uri(self) -> str:
+        return f"http://{self.redirect_host}:{self.redirect_port}/"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.client_id.strip())
+
+    def redacted(self) -> dict[str, object]:
+        """Everything about the API config except the secrets."""
+        return {
+            "base_url": self.base_url,
+            "authorize_url": self.authorize_url,
+            "token_url": self.token_url,
+            "client_id": self.client_id or None,
+            "client_secret_set": bool(self.client_secret),
+            "redirect_uri": self.redirect_uri,
+            "scopes": list(self.scopes),
+            "user_id": self.user_id,
+            "timeout": self.timeout,
+            "retries": self.retries,
+        }
+
+
+@dataclass(frozen=True)
+class ImportSettings:
+    """``[import]`` - how an ad-hoc pull is chunked, timed and reported.
+
+    ``timezone`` is the account's timezone: neither the API's ``dateTime`` strings
+    nor the export CSVs carry an offset, so this is the one place that says what
+    they mean. ``chunk_days`` overrides the per-dataset window the catalog picks
+    (smaller means more requests and finer resume granularity).
+    """
+
+    timezone: str = "UTC"
+    recent_days: int = 7
+    chunk_days: Mapping[str, int] = field(default_factory=dict)
+    rate_limit_reserve: int = 5
+    max_wait_seconds: float = 90.0
+    confirm_above_requests: int = 2000
+    report_keep: int = 20
+
+    def chunk_days_for(self, dataset: str, default: int) -> int:
+        value = int(self.chunk_days.get(dataset, default) or default)
+        return max(1, value)
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """The host-side half of ``config.toml``."""
 
@@ -202,6 +283,8 @@ class AppConfig:
     alert_console: bool
     plugin_timeout: float
     webhook: WebhookSettings
+    api: ApiSettings = field(default_factory=ApiSettings)
+    import_: ImportSettings = field(default_factory=ImportSettings)
 
     @classmethod
     def load(cls, path: Path | None = None, *, missing_ok: bool = True) -> "AppConfig":
@@ -223,6 +306,8 @@ class AppConfig:
         plugins = raw.get("plugins", {}) or {}
         alerts = raw.get("alerts", {}) or {}
         webhook = alerts.get("webhook", {}) or {}
+        api = raw.get("api", {}) or {}
+        import_ = raw.get("import", {}) or {}
         sections = {k: dict(v) for k, v in plugins.items() if isinstance(v, dict)}
         dirs = plugins.get("dirs", []) or []
         if isinstance(dirs, str):
@@ -245,6 +330,29 @@ class AppConfig:
                 enabled=bool(webhook.get("enabled", bool(webhook.get("url")))),
                 allow_insecure=bool(webhook.get("allow_insecure", False)),
                 timeout=float(webhook.get("timeout_seconds", 10)),
+            ),
+            api=ApiSettings(
+                base_url=str(_expand(api.get("base_url")) or "https://api.fitbit.com").rstrip("/"),
+                authorize_url=str(api.get("authorize_url") or "https://www.fitbit.com/oauth2/authorize"),
+                token_url=str(api.get("token_url") or "https://api.fitbit.com/oauth2/token"),
+                client_id=str(_expand(api.get("client_id")) or ""),
+                client_secret=str(_expand(api.get("client_secret")) or ""),
+                redirect_host=str(api.get("redirect_host") or "localhost"),
+                redirect_port=int(api.get("redirect_port", 55413)),
+                scopes=tuple(str(s) for s in (_expand(api.get("scopes")) or [])),
+                user_id=str(api.get("user_id") or "-"),
+                timeout=float(api.get("timeout_seconds", 30)),
+                retries=int(api.get("retries", 3)),
+                credentials_path=Path(_expand(api["credentials_path"])) if api.get("credentials_path") else None,
+            ),
+            import_=ImportSettings(
+                timezone=str(import_.get("timezone") or "UTC"),
+                recent_days=max(1, int(import_.get("recent_days", 7))),
+                chunk_days={str(k): int(v) for k, v in (import_.get("chunk_days") or {}).items()},
+                rate_limit_reserve=int(import_.get("rate_limit_reserve", 5)),
+                max_wait_seconds=float(import_.get("max_wait_seconds", 90)),
+                confirm_above_requests=int(import_.get("confirm_above_requests", 2000)),
+                report_keep=int(import_.get("report_keep", 20)),
             ),
         )
 
