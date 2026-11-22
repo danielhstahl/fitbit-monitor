@@ -113,10 +113,16 @@ class VerifyTest(MaintenanceTestCase):
                 "dataset_registry": True,
                 "series_rows": True,
                 "raw_payload_hashes": True,
+                "series_counts": True,
             },
         )
         self.assertEqual(result.problem_count, 0)
         self.assertIn("checked_at", result.as_dict())
+
+    def test_the_row_counts_are_re_derived_not_remembered(self) -> None:
+        check = next(check for check in maintenance.verify(self.store.conn).checks if check.name == "series_counts")
+        self.assertEqual(check.checked, 3)
+        self.assertTrue(check.ok)
 
     def test_a_corrupted_raw_blob_is_detected(self) -> None:
         self.corrupt_raw_body()

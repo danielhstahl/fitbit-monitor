@@ -245,7 +245,25 @@ def verify(conn: sqlite3.Connection, *, include_bodies: bool = True, sample: int
     if include_bodies:
         result.add(_verify_payloads(conn, sample=sample))
 
+    result.add(_verify_recount(conn))
+
     return result
+
+
+def _verify_recount(conn: sqlite3.Connection) -> Check:
+    """Re-derive the row counts instead of trusting one number from one query.
+
+    Per-dataset counts are what `fm store stats` prints and what the completeness report
+    is judged against, so they are derived by grouping, summed, and compared with a
+    straight COUNT of the table.
+    """
+    total = int(conn.execute("SELECT COUNT(*) AS n FROM series").fetchone()["n"])
+    grouped = conn.execute("SELECT dataset, COUNT(*) AS n FROM series GROUP BY dataset").fetchall()
+    derived = sum(int(row["n"]) for row in grouped)
+    problems: list[str] = []
+    if derived != total:
+        problems.append(f"per-dataset counts sum to {derived}, a straight count says {total}")
+    return Check(name="series_counts", ok=not problems, checked=total, problems=problems)
 
 
 def _verify_payloads(conn: sqlite3.Connection, *, sample: int | None) -> Check:
