@@ -67,10 +67,6 @@ class SeriesStore:
         ).fetchone()
         return json.loads(row["payload"]) if row else None
 
-    def row_state(self, dataset: str, ts: datetime) -> str:
-        """``"insert"`` or ``"duplicate"`` - what writing this instant would do."""
-        return "duplicate" if self.payload_at(dataset, ts) is not None else "insert"
-
     def put(
         self,
         dataset: str,
@@ -87,15 +83,27 @@ class SeriesStore:
         and ``resting_hr`` from another, and a CSV import may meet the same day from a
         different file. Same field twice is last-write-wins, so re-importing a window
         stays a no-op rather than a lossy overwrite.
+
+        The merge happens in SQL (`json_patch`), not by reading the row first: this is
+        the hottest function in the codebase - a year of intraday heart rate is a
+        million calls - and the benchmark says a SELECT per write costs ~25%.
         """
-        payload = dict(self.payload_at(dataset, ts) or {}) if merge else {}
-        payload.update(values)
         self.conn.execute(
             "INSERT INTO series (dataset, ts_utc, payload, source_id) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(dataset, ts_utc) DO UPDATE SET payload = excluded.payload, "
+            "ON CONFLICT(dataset, ts_utc) DO UPDATE SET "
+            "payload = CASE WHEN ? THEN json_patch(series.payload, excluded.payload) "
+            "ELSE excluded.payload END, "
             "source_id = excluded.source_id",
-            (dataset, _iso(ts), json.dumps(payload, sort_keys=True), source_id),
+            (dataset, _iso(ts), json.dumps(dict(values), sort_keys=True), source_id, 1 if merge else 0),
         )
+
+    def instants_between(self, dataset: str, since: datetime, until: datetime) -> set[str]:
+        """The instants already stored for a dataset in a range, as ISO strings."""
+        rows = self.conn.execute(
+            "SELECT ts_utc FROM series WHERE dataset = ? AND ts_utc >= ? AND ts_utc <= ?",
+            (dataset, _iso(since), _iso(until)),
+        )
+        return {row[0] for row in rows}
 
     def put_many(self, rows: Iterable[tuple[str, datetime, Mapping[str, float]]]) -> int:
         count = 0

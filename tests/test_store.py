@@ -64,6 +64,32 @@ class WriterTest(StoreTestCase):
         self.assertFalse(self.store.put_raw("heart_rate", "src", now, '{"bpm":[60]}'))
         self.assertTrue(self.store.put_raw("heart_rate", "src", now, '{"bpm":[61]}'))
 
+    def test_a_second_writer_merges_fields_instead_of_replacing_them(self) -> None:
+        self.store.put("daily_summary", T0, {"steps": 9000.0})
+        self.store.put("daily_summary", T0, {"resting_hr": 55.0})
+        self.store.commit()
+        with ReadOnlyStore(self.path) as ro:
+            point = next(ro.query("daily_summary"))
+        self.assertEqual(point["steps"], 9000.0)
+        self.assertEqual(point["resting_hr"], 55.0)
+
+    def test_merge_false_is_a_clean_overwrite(self) -> None:
+        self.store.put("daily_summary", T0, {"steps": 9000.0, "calories": 2400.0})
+        self.store.put("daily_summary", T0, {"steps": 100.0}, merge=False)
+        self.store.commit()
+        with ReadOnlyStore(self.path) as ro:
+            point = next(ro.query("daily_summary"))
+        self.assertEqual(point["steps"], 100.0)
+        self.assertNotIn("calories", point)
+
+    def test_instants_between_answers_duplicate_without_a_query_per_row(self) -> None:
+        for offset in range(3):
+            self.store.put("hrv", T0 + timedelta(days=offset), {"rmssd": 40.0})
+        self.store.commit()
+        seen = self.store.instants_between("hrv", T0, T0 + timedelta(days=10))
+        self.assertEqual(len(seen), 3)
+        self.assertEqual(self.store.instants_between("sleep", T0, T0 + timedelta(days=10)), set())
+
     def test_delete_range(self) -> None:
         for offset in range(5):
             self.store.put("hrv", T0 + timedelta(days=offset), {"rmssd": 40.0})

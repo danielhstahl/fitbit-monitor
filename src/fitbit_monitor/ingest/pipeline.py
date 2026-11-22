@@ -30,6 +30,11 @@ from ..timeutil import ensure_utc, utcnow
 
 Row = tuple[datetime, Mapping[str, float]]
 
+#: Above this span, "which of these instants already exist?" is answered per row
+#: instead of by one range query, so a pathological call cannot materialise years of
+#: timestamps in memory. Ordinary callers pass a chunk (days, not years).
+_RANGE_QUERY_MAX_DAYS = 400
+
 
 @dataclass
 class IngestStats:
@@ -117,8 +122,14 @@ class Ingest:
         return stats
 
     def rows(self, dataset: str, rows: Iterable[Row], *, source_id: str | None = None) -> IngestStats:
-        """Upsert normalized rows, quarantining any row that is not well formed."""
+        """Upsert normalized rows, quarantining any row that is not well formed.
+
+        Whether each instant is new or already there is answered by one range query
+        rather than one query per row: ``rows`` is called with a chunk (a few days of
+        one dataset), and a million per-row SELECTs is how an import spends its life.
+        """
         stats = IngestStats()
+        good: list[tuple[datetime, Mapping[str, float]]] = []
         for ts, values in rows:
             problem = _row_problem(ts, values)
             if problem:
@@ -128,13 +139,26 @@ class Ingest:
                     dataset, source_id, problem, _safe_json({"ts": str(ts), "values": dict(values)})
                 )
                 continue
-            state = self.store.row_state(dataset, ts)
+            good.append((ts, values))
+        known = self._known_instants(dataset, [ts for ts, _ in good])
+        for ts, values in good:
             self.store.put(dataset, ts, values, source_id=source_id)
-            if state == "insert":
-                stats.rows_inserted += 1
-            else:
+            stamp = ts.isoformat()
+            if stamp in known:
                 stats.rows_duplicate += 1
+            else:
+                stats.rows_inserted += 1
+                known.add(stamp)  # a repeat inside the same chunk is still one row
         return stats
+
+    def _known_instants(self, dataset: str, instants: Sequence[datetime]) -> set[str]:
+        if not instants:
+            return set()
+        since, until = min(instants), max(instants)
+        if (until - since).days > _RANGE_QUERY_MAX_DAYS:
+            # A absurdly wide call is not worth materialising the whole range for.
+            return {ts.isoformat() for ts in instants if self.store.payload_at(dataset, ts) is not None}
+        return self.store.instants_between(dataset, since, until)
 
     def commit(self) -> None:
         """End a chunk: the moment an interrupt becomes safe."""
