@@ -97,6 +97,8 @@ class Ingest:
         rows: Sequence[Row] | None = None,
         *,
         chunk: Chunk | None = None,
+        requested_start: Any = None,
+        requested_end: Any = None,
         commit: bool = True,
     ) -> IngestStats:
         """Store one raw payload and the rows normalised from it.
@@ -104,9 +106,26 @@ class Ingest:
         Raises nothing for bad content: an unparseable body or an invalid row is
         quarantined and reported. Pass ``commit=False`` to fold several payloads into
         one chunk transaction and :meth:`commit` later.
+
+        ``requested_start``/``requested_end`` are the window this response was asked to
+        cover; with neither, the chunk's own days are used. They are stored with the
+        payload so "what do I already have, and what was it for?" is answerable from the
+        raw table alone.
         """
         stats = IngestStats()
-        if self.store.put_raw(dataset, source_id, self.clock(), body, commit=False):
+        if chunk is not None and requested_start is None and chunk.days:
+            requested_start = min(chunk.days)
+            requested_end = requested_end if requested_end is not None else max(chunk.days)
+        if self.store.put_raw(
+            dataset,
+            source_id,
+            self.clock(),
+            body,
+            source=self.source,
+            requested_start=requested_start,
+            requested_end=requested_end,
+            commit=False,
+        ):
             stats.payloads = 1
             stats.bytes_stored = len(body.encode("utf-8"))
         else:

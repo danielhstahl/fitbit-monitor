@@ -50,6 +50,12 @@ CLASSES: list[tuple[str, str]] = [
     ("PluginConfigError", "the plugin rejected its options"),
     ("PluginRuntimeError", "run() raised"),
     ("PluginTimeout", "wall-clock budget exhausted"),
+    ("ReadOnlyStore", "what `ctx.store` is: the whole read API"),
+    ("SeriesPoint", "one stored sample, with units"),
+    ("Coverage", "how complete a window is"),
+    ("Completeness", "coverage plus the gaps behind it"),
+    ("DatasetInfo", "one dataset as stored"),
+    ("Gap", "a break in a series"),
 ]
 
 FUNCTIONS: list[tuple[str, str]] = [

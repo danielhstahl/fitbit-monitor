@@ -22,7 +22,7 @@ from this package; ``docs/plugins.md`` is the prose version.
 from __future__ import annotations
 
 from ..store.downsample import aggregate, daily_values, downsample
-from ..store.reader import Coverage, ReadOnlyStore, SeriesPoint
+from ..store.reader import Completeness, Coverage, DatasetInfo, Gap, ReadOnlyStore, SeriesPoint
 from .contract import (
     MIN_PLUGIN_API_VERSION,
     PLUGIN_API_VERSION,
@@ -51,6 +51,9 @@ __all__ = [
     "PLUGIN_API_VERSION",
     "Alert",
     "AlertDispatcher",
+    "Completeness",
+    "DatasetInfo",
+    "Gap",
     "ConsoleSink",
     "Coverage",
     "Evidence",

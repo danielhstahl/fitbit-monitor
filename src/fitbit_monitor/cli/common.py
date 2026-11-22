@@ -25,6 +25,7 @@ from ..plugins.registry import PluginRegistry
 from ..store.reader import ReadOnlyStore
 from ..store.writer import SeriesStore
 from ..timeutil import DateRange, parse_date_arg
+from .. import logsafe
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -182,8 +183,15 @@ def session_from_args(args: argparse.Namespace) -> Session:
 
 
 def configure_logging(verbose: int, quiet: bool) -> None:
+    """Set up the root handler, with health-value redaction on it.
+
+    Every log line fm writes passes a :class:`~fitbit_monitor.logsafe.RedactingFilter`,
+    so a debug line that quotes a reading ends up as ``resting_hr=<redacted>``. Datasets,
+    counts, dates and durations are left alone - see ``docs/data-policy.md``.
+    """
     level = logging.DEBUG if verbose > 1 else logging.INFO if verbose else logging.ERROR if quiet else logging.WARNING
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+    logsafe.install()
 
 
 __all__ = [

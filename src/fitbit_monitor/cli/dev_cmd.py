@@ -2,7 +2,9 @@
 
 The seed corpus is deterministic (same ``--seed`` and ``--end``, same bytes), which
 is what makes it usable from the benchmark job and from plugin test suites as well
-as from a terminal.
+as from a terminal. It is **synthetic**: it did not come from an account or a device,
+it never leaves the machine, and the abnormal episodes it can inject are labelled as
+synthetic in ``dev_annotation``.
 """
 
 from __future__ import annotations
@@ -18,9 +20,21 @@ def register(sub: "argparse._SubParsersAction") -> None:
     dsub = dev.add_subparsers(dest="dev_command", required=True)
 
     seed = dsub.add_parser("seed", help="fill the store with deterministic sample data")
-    seed.add_argument("--days", type=int, default=30, help="days of history to write (default 30)")
+    seed.add_argument("--days", type=int, default=90, help="days of history to write (default 90)")
     seed.add_argument("--end", default=None, help="last day written, YYYY-MM-DD (default today)")
     seed.add_argument("--seed", type=int, default=1337, help="RNG seed (default 1337)")
+    seed.add_argument(
+        "--anomalies",
+        type=int,
+        default=None,
+        help="labelled abnormal episodes to inject (default: one every 14 days)",
+    )
+    seed.add_argument(
+        "--no-anomalies",
+        action="store_true",
+        help="write a clean corpus with no injected episodes",
+    )
+    seed.add_argument("--no-gaps", action="store_true", help="write every day (default: skip a few, to exercise coverage)")
     seed.add_argument("--fresh", action="store_true", help="delete existing series rows first")
     seed.add_argument("--json", action="store_true")
     seed.set_defaults(func=cmd_dev_seed)
@@ -34,10 +48,18 @@ def cmd_dev_seed(args: argparse.Namespace, session: Session) -> int:
     from ..store.seed import seed_store
 
     end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else datetime.now(UTC).date()
+    anomalies = 0 if args.no_anomalies else args.anomalies
     with session.write_store() as store:
         if args.fresh:
             store.clear()
-        plan = seed_store(store, days=args.days, seed=args.seed, end=end)
+        plan = seed_store(
+            store,
+            days=args.days,
+            seed=args.seed,
+            end=end,
+            drop_missing_days=not args.no_gaps,
+            anomalies=anomalies,
+        )
         totals = {dataset: store.count(dataset) for dataset in sorted(store.datasets())}
     payload = {**plan.as_dict(), "store": str(session.store_path), "totals": totals}
     if args.json:
@@ -49,7 +71,16 @@ def cmd_dev_seed(args: argparse.Namespace, session: Session) -> int:
         print(f"  {dataset:<16} {count}")
     if plan.dropped_days:
         print(f"  deliberately missing days: {', '.join(d.isoformat() for d in plan.dropped_days)}")
-    print("\ntry: fm plugins run --all --since 30d")
+    if plan.episodes:
+        print(f"  injected labelled episodes ({len(plan.episodes)}):")
+        for episode in plan.episodes:
+            print(
+                f"    {episode.kind:<15} {episode.start.isoformat(timespec='minutes')} "
+                f".. {episode.end.isoformat(timespec='minutes')}  mean {episode.mean_hr:g} bpm"
+            )
+        print("  these are synthetic and labelled as such in dev_annotation - not real episodes")
+    print("\nthis is synthetic sample data about nobody; it never leaves this machine")
+    print("try: fm plugins run --all --since 30d")
     return EXIT_OK
 
 

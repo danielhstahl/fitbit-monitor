@@ -532,6 +532,59 @@ The plugin's `run()` raised. Other plugins still get their turn
 
 The plugin exceeded its wall-clock budget and was abandoned
 
+### `ReadOnlyStore` - what `ctx.store` is: the whole read API
+`class ReadOnlyStore(path: Path, connection: sqlite3.Connection | None = None)`
+
+Read-only view of the local store. The plugin's only window onto data
+
+Members:
+  - `query(self, dataset: str, since: datetime | None = None, until: datetime | None = None, *, fields: Sequence[str] | None = None, order: str = asc, limit: int | None = None) -> Iterator[SeriesPoint]` - Iterate points of `dataset` in `[since, until)`
+  - `series(self, dataset: str, window: DateRange, **kw) -> Iterator[SeriesPoint]` - `query` with the run window already applied
+  - `coverage(self, dataset: str, since: datetime, until: datetime) -> Coverage` - Point count plus which calendar days are present in `[since, until)`
+  - `days_with_data(self, dataset: str | None = None) -> list[date]` - Distinct calendar days that have at least one stored point
+  - `has_any_data(self, datasets: Sequence[str], window: DateRange) -> bool` - False when *nothing* is stored for the window - a run says so out loud
+  - `day(self, dataset: str, day: date | datetime | str) -> list[SeriesPoint]` - Every point of `dataset` on one calendar day (UTC), oldest first
+  - `describe(self, dataset: str) -> catalog.DatasetSpec` - Kind, grain, fields and units of one dataset (see :mod:`.datasets`)
+  - `units(self, dataset: str) -> dict[str, str]` - `{field: unit}` for a dataset - the units a report must print
+  - `grain_seconds(self, dataset: str) -> int | None` - Native spacing of a dataset, or `None` when fm does not know it
+  - `gaps(self, dataset: str, since: datetime, until: datetime, *, max_gap_seconds: float | None = None, tolerance: float = 3) -> tuple[Gap, ...]` - Breaks in a series inside `[since, until)`, longest break first
+  - `completeness(self, dataset: str, since: datetime, until: datetime, *, max_gap_seconds: float | None = None) -> Completeness` - Coverage and gaps together - the answer before computing a metric on a window
+  - `stored_datasets(self) -> tuple[DatasetInfo, ...]` - Every registered dataset with its extent and its cost on disk
+  - `iter_raw(self, **filters) -> Iterator[RawPayload]` - Stored payloads, oldest fetch first. See fitbit_monitor.store.raw.iter_payloads
+  - `raw_payload(self, content_hash: str, *, with_body: bool = True) -> RawPayload | None` - One stored payload by content hash, bytes included
+  - `raw_for(self, dataset: str, ts: datetime) -> RawPayload | None` - The most recent payload fetched for a dataset at or before `ts`
+  - `raw_totals(self, dataset: str | None = None) -> dict[str, dict[str, float]]` - Payload counts and bytes per dataset (`"all"` included)
+  - `assert_read_only(self)` - Raise if this handle could write. Cheap, and used by the contract test suite
+
+### `SeriesPoint` - one stored sample, with units
+`class SeriesPoint(ts: datetime, values: Mapping[str, float], dataset: str = )`
+
+One stored sample: an instant plus the numeric fields recorded at it
+
+Members:
+  - `unit(self, name: str) -> str | None` - The unit of one field, or `None` when the catalog does not name it
+  - `items_with_units(self) -> tuple[tuple[str, float, str | None], ...]` - `(field, value, unit)` triples - what a report prints without guessing
+
+### `Coverage` - how complete a window is
+`class Coverage(dataset: str, since: datetime, until: datetime, points: int, days_expected: int, days_present: int, missing_days: tuple[date, ...] = (), first_ts: datetime | None = None, last_ts: datetime | None = None)`
+
+How complete a dataset is over a window - plugins report this honestly
+
+### `Completeness` - coverage plus the gaps behind it
+`class Completeness(coverage: Coverage, gaps: tuple[Gap, ...] = (), max_gap_seconds: float | None = None)`
+
+Coverage plus the gaps behind it: "is this window safe to compute on?"
+
+### `DatasetInfo` - one dataset as stored
+`class DatasetInfo(name: str, kind: str = daily, granularity_seconds: int | None = None, points: int = 0, first_ts: datetime | None = None, last_ts: datetime | None = None, days_present: int = 0, payload_count: int = 0, payload_bytes: int = 0, stored_bytes: int = 0)`
+
+One dataset as stored: shape, extent, and what it costs on disk
+
+### `Gap` - a break in a series
+`class Gap(start: datetime, end: datetime, seconds: float)`
+
+A break in a series longer than the dataset's own grain allows
+
 ### `run_plugins()` - run plugins over a window
 
 `run_plugins(registry: PluginRegistry, store: ReadOnlyStore, window: DateRange, *, config: AppConfig | None = None, names: Sequence[str] | None = None, timeout: float = 120.0, dispatcher: AlertDispatcher | None = None, clock: Clock | None = None) -> RunReport`

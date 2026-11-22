@@ -11,7 +11,8 @@ the alert webhook you configure - see [docs/data-policy.md](docs/data-policy.md)
 > Status: the store core, the plugin system and the import path (`fm auth`,
 > `fm import`) are implemented, including the shipped `resting_trend` example
 > plugin. `fm dev seed` still writes a deterministic sample corpus, so every
-> command below works before you have connected an account.
+> command below works before you have connected an account - and that corpus is
+> synthetic data about nobody, never real health data and never sent anywhere.
 
 ## Quickstart
 
@@ -25,7 +26,10 @@ fm import --since 2026-05-01 --until 2026-05-14    # pull two weeks
 fm import history                   # what the last runs landed
 fm import --source csv --path ~/Downloads/export.zip   # backfill from the web export
 
-fm dev seed --days 45                 # deterministic sample data
+fm dev seed --days 90                 # deterministic synthetic sample data (not real data)
+fm store stats                        # rows, coverage and bytes per dataset
+fm store verify                       # re-hash the retained raw payloads (nonzero exit on trouble)
+fm store backup                       # one consistent snapshot file you can copy anywhere
 fm plugins list                       # what is installed, and what is broken
 fm plugins show resting_trend         # one plugin's options and effective config
 fm plugins run --all --since 30d      # compute metrics, deliver alerts
@@ -54,13 +58,19 @@ cd ~/fm-plugins/resting_vs_steps && python -m pytest -q
 | `fm import --source csv --path EXPORT [--file F] [--glob G]` | backfill from a Fitbit export or Google Takeout |
 | `fm import report [--run-id R]` / `history` / `watermarks` | what a run did, from its report and the `dataset_run` table |
 | `fm config show [--json]` / `fm config init` | the effective configuration, and a commented starting point |
+| `fm db init` / `fm db migrate` / `fm db status [--json]` | create the store, apply numbered SQL migrations, inspect the schema |
+| `fm store stats [--json]` | per-dataset row counts, date coverage, raw vs normalized bytes, duplicate and quarantine counts |
+| `fm store verify [--quick] [--sample N] [--json]` | re-hash every retained payload and re-check integrity; nonzero exit on trouble |
+| `fm store export --format jsonl\|csv [--what series\|raw] [--dataset D] [--output F]` | portable copy of the series or of the original payloads |
+| `fm store backup [--output F]` | one consistent snapshot via SQLite's online backup API |
+| `fm store prune --days N [--what …] [--execute]` | retention - a **dry run** unless `--execute` is given |
 | `fm plugins list [--dir DIR] [--json]` | discovered plugins with version, source, datasets, and any load error |
 | `fm plugins show NAME [--json]` | one plugin's metadata, options, effective config, unused config keys |
 | `fm plugins validate [NAME ...]` | load and configure plugins without running them |
 | `fm plugins run [NAME ...] [--all] [--since D] [--until D] [--set NAME.KEY=VAL] [--json] [--timeout S] [--no-deliver]` | run plugins over a range and deliver their alerts |
 | `fm plugin new NAME [--dir DIR] [--force]` | scaffold a plugin that already passes the contract tests |
 | `fm alerts list [--since D] [--severity S] [--plugin P] [--json]` | read the stored alert history |
-| `fm dev seed [--days N] [--end DATE] [--seed N] [--fresh]` | write deterministic sample data |
+| `fm dev seed [--days N] [--end DATE] [--seed N] [--anomalies N] [--no-gaps] [--fresh]` | write deterministic synthetic sample data, with labelled abnormal episodes |
 | `fm dev info [--json]` | what is in the store right now |
 
 Exit codes, the same for every command:
@@ -93,8 +103,13 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
 
 * [docs/plugins.md](docs/plugins.md) - authoring guide, API reference, and the
   built-in plugin explained.
+* [docs/storage.md](docs/storage.md) - the store: schema, migrations, the read API,
+  the UTC convention, verify/backup/export, and retention.
 * [docs/data-import.md](docs/data-import.md) - auth, planning a pull, resuming an
   interrupted one, CSV backfill, and what each dataset means.
+* [docs/adr/0003-storage-model.md](docs/adr/0003-storage-model.md) - why raw payloads
+  are the record, one `series` table plus typed views, and what makes an overlapping
+  import idempotent.
 * [docs/adr/0004-plugin-contract.md](docs/adr/0004-plugin-contract.md) - the
   normative contract: interfaces, discovery, config, versioning, isolation.
 * [docs/adr/0005-ad-hoc-import.md](docs/adr/0005-ad-hoc-import.md) - why chunks,
@@ -134,13 +149,16 @@ Things the tests hold to, worth knowing before you change them:
 
 ```
 src/fitbit_monitor/
-  store/       schema, writer, read-only reader, coverage, downsample, seed data, alert history, watermarks
+  store/       migrations/*.sql + runner, writer, read-only reader (coverage, gaps, raw access), raw retention,
+               dataset/unit catalog, downsample, seed data, maintenance (stats, verify, export, backup, prune),
+               alert history, watermarks
   api/         http (transport, fixtures), auth (PKCE, token store), client (rate limits, ETags), catalog (endpoint shapes)
   ingest/      importer (plan + run), pipeline (dedupe, quarantine), csv_source (export/Takeout), report, runlog
   plugins/     contract.py models.py loader.py registry.py runner.py sinks.py scaffold.py testing.py
     builtin/   resting_trend.py - the reference plugin
-  cli/         common.py auth_cmd.py config_cmd.py import_cmd.py plugins_cmd.py alerts_cmd.py dev_cmd.py
-docs/          plugins.md, data-import.md, data-policy.md, adr/
+  cli/         common.py auth_cmd.py config_cmd.py db_cmd.py store_cmd.py import_cmd.py plugins_cmd.py alerts_cmd.py dev_cmd.py
+  logsafe.py   health-value redaction for everything that reaches a log handler
+docs/          storage.md, plugins.md, data-import.md, data-policy.md, adr/
 scripts/       ci/{lint,coverage,benchmarks,post_commit}.sh, bench/, dev/, docs/
 tests/         stdlib unittest - runs under pytest or `python -m unittest discover`
 ```

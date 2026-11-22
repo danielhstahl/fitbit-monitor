@@ -23,6 +23,7 @@ STATUS_COLUMNS = (
     "requests",
     "rows_inserted",
     "rows_duplicate",
+    "payloads_duplicate",
     "quarantined",
     "bytes_stored",
     "duration_ms",
@@ -47,6 +48,7 @@ class DatasetRun:
     requests: int = 0
     rows_inserted: int = 0
     rows_duplicate: int = 0
+    payloads_duplicate: int = 0
     quarantined: int = 0
     bytes_stored: int = 0
     duration_ms: int = 0
@@ -67,6 +69,7 @@ class DatasetRun:
             "requests": self.requests,
             "rows_inserted": self.rows_inserted,
             "rows_duplicate": self.rows_duplicate,
+            "payloads_duplicate": self.payloads_duplicate,
             "quarantined": self.quarantined,
             "bytes_stored": self.bytes_stored,
             "duration_ms": self.duration_ms,
@@ -106,6 +109,7 @@ class RunLog:
                 requests=dataset.requests,
                 rows_inserted=dataset.rows_inserted,
                 rows_duplicate=dataset.rows_duplicate,
+                payloads_duplicate=dataset.payloads_duplicate,
                 quarantined=dataset.quarantined,
                 bytes_stored=dataset.bytes_stored,
                 duration_ms=dataset.duration_ms,

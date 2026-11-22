@@ -24,7 +24,7 @@ import argparse
 import sys
 from typing import Sequence
 
-from . import alerts_cmd, auth_cmd, config_cmd, dev_cmd, import_cmd, plugins_cmd
+from . import alerts_cmd, auth_cmd, config_cmd, db_cmd, dev_cmd, import_cmd, plugins_cmd, store_cmd
 from .common import (
     EXIT_ERROR,
     EXIT_NO_STORE,
@@ -47,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=False)
     config_cmd.register(sub)
     auth_cmd.register(sub)
+    db_cmd.register(sub)
+    store_cmd.register(sub)
     import_cmd.register(sub)
     plugins_cmd.register(sub)
     alerts_cmd.register(sub)
@@ -57,16 +59,22 @@ def build_parser() -> argparse.ArgumentParser:
 _EPILOG = """\
 examples:
   fm config init                              write the starter config.toml
+  fm db status                                schema version and what is in the schema
+  fm dev seed --days 90                       deterministic sample data (not real health data)
   fm auth login                               authorize fm against your account
   fm import --dry-run                         what an import would cost, before spending it
   fm import --since 7d                        pull the last week (or: since the last import)
   fm import --source csv --path export.zip    backfill from the Fitbit web export
+  fm store stats                              rows, coverage and bytes per dataset
+  fm store verify                             re-hash the retained raw payloads
+  fm store backup                             one consistent snapshot file
+  fm store prune --days 365                   what retention would delete (dry run)
   fm plugins list                             what is installed (and what is broken)
   fm plugins run --all --since 30d            compute metrics, deliver alerts
   fm alerts list --since 7d                   what has been flagged
   fm plugin new resting_hrv --dir ~/plugins   scaffold a plugin
 
-Docs: docs/quickstart.md (first auth, first import), docs/importing.md (backfill,
+Docs: docs/storage.md (the store, retention, the read API), docs/importing.md (backfill,
 overlaps, rate limits), docs/plugins.md (writing a plugin).
 """
 

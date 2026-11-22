@@ -36,6 +36,7 @@ from fitbit_monitor.ingest.report import (
     summarise_runs,
 )
 from fitbit_monitor.ingest.runlog import DatasetRun, RunLog
+from fitbit_monitor.store import schema
 from fitbit_monitor.store.watermarks import Watermarks
 from fitbit_monitor.store.writer import SeriesStore, write_lock
 
@@ -449,10 +450,14 @@ class StoreMigrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "old.sqlite3"
             conn = sqlite3.connect(path)
-            conn.execute("CREATE TABLE fm_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            conn.execute("INSERT INTO fm_meta VALUES ('schema_version', '1')")
-            conn.execute("CREATE TABLE series (dataset TEXT, ts_utc TEXT, payload TEXT, source_id TEXT)")
-            conn.execute("INSERT INTO series VALUES ('hrv', '2026-05-01T00:00:00+00:00', '{\"rmssd\":40.0}', NULL)")
+            schema.migrate_store(conn, target=1)
+            conn.execute(
+                "INSERT INTO series VALUES ('hrv', '2026-05-01T00:00:00+00:00', '{\"rmssd\":40.0}', NULL)"
+            )
+            conn.execute(
+                "INSERT INTO raw_payload (dataset, source_id, fetched_at, content_hash, body) "
+                "VALUES ('hrv', 'legacy', '2026-05-01T00:00:00+00:00', 'deadbeef', '{\"hrv\":[]}')"
+            )
             conn.commit()
             conn.close()
             store = SeriesStore(path)
@@ -460,9 +465,14 @@ class StoreMigrationTest(unittest.TestCase):
             marks = Watermarks(store)
             marks.advance("hrv", "api", last_day=date(2026, 5, 1), last_ts=T0)
             survived = store.count("hrv")
+            # The legacy payload survived too, and still decompresses: 0003 rewrites the
+            # table, not the bytes.
+            kept = list(store.raw_payloads())
             store.close()
-            self.assertEqual(version, "2")
+            self.assertEqual(version, str(schema.SCHEMA_VERSION))
             self.assertEqual(survived, 1, "existing rows survive the migration")
+            self.assertEqual([p.body for p in kept], ['{"hrv":[]}'])
+            self.assertEqual([p.encoding for p in kept], ["identity"])
 
 
 if __name__ == "__main__":  # pragma: no cover

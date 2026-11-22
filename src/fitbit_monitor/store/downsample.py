@@ -44,6 +44,8 @@ def aggregate(values: Sequence[float], how: str = "mean") -> float | None:
 
 def bucket_key(ts: datetime, period: str) -> datetime:
     """Truncate ``ts`` to the start of its ``period`` bucket (UTC)."""
+    if period in ("minute", "min", "1m"):
+        return ts.replace(second=0, microsecond=0)
     if period == "hour":
         return ts.replace(minute=0, second=0, microsecond=0)
     if period in ("day", "daily"):
@@ -55,7 +57,7 @@ def bucket_key(ts: datetime, period: str) -> datetime:
         return ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     if period in ("", "none", None):  # type: ignore[comparison-overlap]
         return ts
-    raise UsageError(f"unknown period {period!r}", hint="use hour, day, week or month")
+    raise UsageError(f"unknown period {period!r}", hint="use minute, hour, day, week or month")
 
 
 def downsample(
@@ -66,6 +68,10 @@ def downsample(
     fields: Sequence[str] | None = None,
 ) -> Iterator[SeriesPoint]:
     """Bucket points by ``period`` and aggregate each numeric field with ``how``.
+
+    The aggregation method is part of the signature - ``downsample(points, "hour",
+    how="max")`` says what it did - so a chart and a plugin cannot quietly disagree about
+    whether an hour means "average" or "peak".
 
     Buckets come out in chronological order. A field that is absent from every
     point in a bucket is absent from the bucket, so callers can tell "no data"

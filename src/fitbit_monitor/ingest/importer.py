@@ -605,11 +605,28 @@ class Importer:
                     continue
                 raise _ChunkFailed(f"{path}: {exc}")
             parsed = _parse_json(response)
+            asked = max(request.covers) if request.covers else request.day
             if parsed is None:
-                stats += self.ingest.payload(dataset.name, path, response.text, rows=None, commit=False)
+                stats += self.ingest.payload(
+                    dataset.name,
+                    path,
+                    response.text,
+                    rows=None,
+                    requested_start=request.day,
+                    requested_end=asked,
+                    commit=False,
+                )
                 result.notes.append(f"{path}: payload was not JSON (quarantined)")
                 continue
-            stats += self.ingest.payload(dataset.name, path, response.text, rows=[], commit=False)
+            stats += self.ingest.payload(
+                dataset.name,
+                path,
+                response.text,
+                rows=[],
+                requested_start=request.day,
+                requested_end=asked,
+                commit=False,
+            )
             payloads.append(Payload(day=request.day, body=parsed))
         last_ts: datetime | None = None
         if payloads:

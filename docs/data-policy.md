@@ -66,16 +66,91 @@ no analytics, and no account.
 
 | file | contains | notes |
 |---|---|---|
-| `<data-dir>/store.sqlite3` | raw payloads, normalized series, alert history, import history and quarantine | `0600` recommended; the encryption question is tracked in the storage epic |
+| `<data-dir>/store.sqlite3` | raw payloads, normalized series, the dataset registry, watermarks, import history, quarantine, alert history | `0600` recommended; the one file that is your data, and the one file `fm store backup` copies |
+| `<data-dir>/backups/*.sqlite3` | snapshots made by `fm store backup` | full copies of the store - protect them exactly as much as the store itself, and delete them when you want the data gone |
 | `<data-dir>/credentials.json` | Fitbit access and refresh tokens | written `0600`; `fm auth logout` deletes it |
 | `<data-dir>/imports/*.json` | one report per import run: ranges, counts, watermarks, errors | the last `[import] report_keep` runs; contains dates and counts, not measurements |
 | `<data-dir>/http-etag-cache.json` | ETags and response bodies for conditional GETs | cache only; safe to delete, costs refetches |
-| `<data-dir>/alerts.jsonl` | every delivered alert, append-only | rotate or delete freely; it is a convenience copy |
+| `<data-dir>/alerts.jsonl` | every delivered alert, append-only | plugin, key, title, message, severity, timestamp, confidence, evidence - a summary of a finding, not a raw series; rotate or delete freely |
+| whatever you pass to `fm store export` | the normalized series, or the original raw payloads | created only when you ask, and it prints where it wrote; treat the file like the store |
 | `<config-dir>/config.toml` | paths, plugin options, webhook URL | contains your webhook URL - treat it as a secret if it has a token in it |
 
 Default locations are `$XDG_DATA_HOME/fitbit-monitor` and
 `$XDG_CONFIG_HOME/fitbit-monitor`, overridable with `--data-dir`, `--config`, `--db`
 or `FM_DATA_DIR` / `FM_CONFIG` / `FM_DB`.
+
+### Exclude these from cloud sync and backup
+
+The data directory is the thing a cloud-sync client will happily upload. Exclude, on
+Dropbox / OneDrive / Google Drive / iCloud / Time Machine-as-offsite-copy alike:
+
+* `~/.local/share/fitbit-monitor/` (or `$XDG_DATA_HOME/fitbit-monitor`) - the store,
+  the token file, the import reports, the ETag cache, the alert log, and `backups/`;
+* `~/Library/Application Support/fitbit-monitor/` on macOS, if that is where your
+  `XDG_DATA_HOME` resolves;
+* `<config-dir>/fitbit-monitor/config.toml` - not health data, but it holds your webhook
+  URL;
+* anything you have pointed `fm store export --output` at.
+
+Backups are not offsite-by-default: `fm store backup` writes next to the store and goes
+nowhere else. If you want an offsite copy, encrypt the destination yourself (an
+encrypted disk image, `restic`, `age`) - the file it produces is plaintext, like the
+store it came from.
+
+### Logs
+
+Log output names datasets, counts, dates, durations and file paths. It does not contain
+readings: every record that reaches an `fm` log handler passes a redacting filter
+(`fitbit_monitor.logsafe`) that rewrites a health value in a message to
+`resting_hr=<redacted>`, including values that arrive as deferred `%s` arguments. A test
+asserts it (`tests/test_data_policy.py`), because a promise about logs that no test
+enforces is a comment, not a guarantee. Alert titles and messages *are* summaries of
+findings ("resting HR up 9 bpm over 6 weeks") - that is their purpose, and they are
+local unless you configured a webhook.
+
+## Retention
+
+**Default retention: keep everything.** The API's own history is finite and this store is
+the copy you own; deleting by default is the wrong direction for data you cannot get back.
+
+Where someone wants a bound, `fm store prune` implements the policy and
+**its default behaviour is a dry run**:
+
+```
+fm store prune --days 365              # prints what would go; deletes nothing
+fm store prune --days 365 --execute    # deletes raw payloads fetched over a year ago
+fm store prune --days 365 --what all --execute --vacuum
+```
+
+* The documented default horizon for anyone who does prune is **365 days**, and `--days`
+  defaults to it.
+* `--what` defaults to `raw`: retained responses are the bulk of the file and the only
+  part a source may still re-send. Normalized series and quarantine data are only touched
+  when you name them.
+* Pruning never touches watermarks, so a pruned window is still a window `fm` records as
+  fetched - and re-importing it later is safe, just wasted requests.
+* `--execute` is required. A mistyped retention command cannot delete a year of
+  heart-rhythm history on the strength of one flag.
+
+### Encryption at rest: deliberately not implemented
+
+Recorded here so the question is answered rather than deferred
+([ADR-0003](adr/0003-storage-model.md) §7):
+
+* **Not implemented, on purpose.** SQLCipher means a C extension, which breaks the
+  stdlib-only rule that keeps a fresh clone runnable and a plugin author's environment
+  empty; it needs a key, and a key stored next to the database it protects is theatre;
+  every SQLite tool and `fm store verify` check would have to go through it.
+* **The threat that actually applies here** is a lost machine or a cloud-synced folder,
+  and it is handled by full-disk encryption (FileVault / BitLocker / LUKS), by writing the
+  store `0600`, and by the exclusion list above.
+* **What would change the answer:** a deployment on a shared or multi-user machine, or a
+  supported "sync my store" feature. Either one makes at-rest encryption a requirement
+  rather than a trade-off.
+
+So: the store is plaintext, the policy says so out loud, and the two mitigations that are
+free (whole-disk encryption, keeping the directory out of the cloud) are the ones the
+documentation tells you to do.
 
 ## Plugins
 
@@ -92,10 +167,13 @@ exist, and why a plugin registry is a deliberate non-goal for now
 
 ## Deletion
 
-`fm auth logout` removes the tokens. `fm store prune` (storage epic) and, today,
-plain SQL against the store. Deleting `store.sqlite3`, `credentials.json`,
-`imports/`, `http-etag-cache.json` and `alerts.jsonl` removes everything this
-program knows; there is no server-side copy to delete, which is the point.
+`fm auth logout` removes the tokens. `fm store prune --days N --execute` removes old data
+(see **Retention**). To remove a whole dataset or window today, that is one SQL
+`DELETE` against the store - `fm store export` first if you want the copy in hand.
+
+Deleting `store.sqlite3`, `backups/`, `credentials.json`, `imports/`,
+`http-etag-cache.json` and `alerts.jsonl` removes everything this program knows; there is
+no server-side copy to delete, which is the point.
 
 ## Not covered here
 
