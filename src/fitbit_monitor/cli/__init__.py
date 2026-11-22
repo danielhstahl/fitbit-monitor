@@ -14,6 +14,7 @@ Exit codes (the same for every subcommand):
 3    an import partially failed (some datasets landed, some did not)
 4    the local store is missing or unusable
 5    an import landed with warnings (quarantined payloads, bad rows)
+72   the command exists but is not implemented in this build
 130  an import was interrupted; what was fetched is stored
 ===  ==========================================
 """
@@ -24,7 +25,8 @@ import argparse
 import sys
 from typing import Sequence
 
-from . import alerts_cmd, auth_cmd, config_cmd, db_cmd, dev_cmd, import_cmd, plugins_cmd, store_cmd
+from . import alerts_cmd, auth_cmd, config_cmd, db_cmd, dev_cmd, doctor_cmd, import_cmd
+from . import plugins_cmd, report_cmd, store_cmd
 from .common import (
     EXIT_ERROR,
     EXIT_NO_STORE,
@@ -52,6 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
     import_cmd.register(sub)
     plugins_cmd.register(sub)
     alerts_cmd.register(sub)
+    report_cmd.register(sub)
+    doctor_cmd.register(sub)
     dev_cmd.register(sub)
     return parser
 
@@ -73,15 +77,23 @@ examples:
   fm plugins run --all --since 30d            compute metrics, deliver alerts
   fm alerts list --since 7d                   what has been flagged
   fm plugin new resting_hrv --dir ~/plugins   scaffold a plugin
+  fm doctor                                   what is wrong with this install (planned)
 
-Docs: docs/storage.md (the store, retention, the read API), docs/importing.md (backfill,
+Docs: docs/storage.md (the store, retention, the read API), docs/data-import.md (backfill,
 overlaps, rate limits), docs/plugins.md (writing a plugin).
 """
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        # `--help` prints and raises SystemExit(0); an unparsable line raises 2. Both are
+        # results, not crashes: turned back into codes so that `main` never escapes the
+        # exception and every caller - the console script, a test, another program -
+        # sees the same contract.
+        return int(exc.code or 0)
     if getattr(args, "version", False):
         from .. import __version__
 

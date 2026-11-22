@@ -16,8 +16,9 @@ if [[ "${1:-}" != "--no-install" ]]; then
     "$PYTHON" -m pip install --quiet -e ".[dev]"
 fi
 
-echo "== mypy"
-"$PYTHON" -m mypy
+# The type check is its own gate; calling it here is what keeps `lint` and `typecheck`
+# from drifting into two different meanings of "the types are fine".
+./scripts/ci/typecheck.sh --no-install
 
 echo
 if ! "$PYTHON" -c "import ruff" 2>/dev/null; then

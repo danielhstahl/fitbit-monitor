@@ -16,6 +16,11 @@ anywhere except the alert webhook you configure - see
 > command below works before you have connected an account - and that corpus is
 > synthetic data about nobody, never real health data and never sent anywhere.
 >
+> Two commands - `fm report` and `fm doctor` - are declared in the parser and in the
+> table below but do not compute anything yet: they print what will replace the
+> commands they are meant to fold together and exit **72** (not implemented), so a
+> script can tell "not built" from "failed".
+>
 > Data source: the **Google Health API** (`https://health.googleapis.com/v4`), decided
 > and dated in [ADR-0002](docs/adr/0002-health-api-source.md), with a Google Takeout
 > archive as an equal first-class source (`fm import --source csv`). The legacy Fitbit
@@ -25,7 +30,10 @@ anywhere except the alert webhook you configure - see
 ## Quickstart
 
 ```bash
-./scripts/dev/bootstrap.sh && . .venv/bin/activate   # uv when present, else venv + pip
+# install + activate: bootstrap.sh runs `uv sync --extra dev` when uv is on PATH,
+# `python -m venv` + `pip install -e ".[dev]"` when it is not (ADR-0001 §2, §3)
+./scripts/dev/bootstrap.sh && . .venv/bin/activate
+./scripts/dev/check.sh --quick      # every gate CI runs (lint, tests + coverage), minus the benchmark
 
 fm auth login                       # one-time browser consent; token stays local
 fm import --dry-run                 # what would this fetch, and at what cost
@@ -77,6 +85,8 @@ cd ~/fm-plugins/resting_vs_steps && python -m pytest -q
 | `fm plugins run [NAME ...] [--all] [--since D] [--until D] [--set NAME.KEY=VAL] [--json] [--timeout S] [--no-deliver]` | run plugins over a range and deliver their alerts |
 | `fm plugin new NAME [--dir DIR] [--force]` | scaffold a plugin that already passes the contract tests |
 | `fm alerts list [--since D] [--severity S] [--plugin P] [--json]` | read the stored alert history |
+| `fm report [--since D] [--until D] [--json]` | **planned, not implemented** (exit 72): one document over a range; today: `fm import report`, `fm store stats`, `fm alerts list` |
+| `fm doctor [--quick] [--json]` | **planned, not implemented** (exit 72): one-pass install diagnosis; today: `fm config show`, `fm auth status`, `fm db status`, `fm store verify`, `fm plugins validate` |
 | `fm dev seed [--days N] [--end DATE] [--seed N] [--anomalies N] [--no-gaps] [--fresh]` | write deterministic synthetic sample data, with labelled abnormal episodes |
 | `fm dev info [--json]` | what is in the store right now |
 
@@ -88,6 +98,7 @@ Exit codes, the same for every command:
 | 1 | a plugin errored, misconfigured itself, or timed out; or an import landed nothing |
 | 2 | bad arguments or unreadable config |
 | 4 | no local store to read - create one with `fm dev seed` |
+| 72 | the command exists in this build but is not implemented (`fm report`, `fm doctor`) |
 
 `fm import` adds three of its own, because "it ran" is not a useful answer for a
 job that costs thousands of rate-limited requests: **3** partial (some datasets
@@ -143,17 +154,22 @@ types; `scripts/ci/*` is the gate underneath it, which the workflows call with
 ```bash
 ./scripts/dev/bootstrap.sh      # create .venv (uv when present, else venv + pip)
 ./scripts/dev/lint.sh           # mypy + ruff + byte-compile + workflow/shell parse
+./scripts/dev/typecheck.sh      # mypy alone - the fastest "did I break a type" answer
 ./scripts/dev/test.sh           # unittest + pytest + the coverage floor
+./scripts/dev/coverage.sh       # the same gate, named the way CI names it
 ./scripts/dev/bench.sh          # plugin system vs benchmarks/baseline.json
 ./scripts/dev/check.sh          # all three - what CI runs after every commit
 ./scripts/dev/docs.sh           # regenerate the API reference block in docs/plugins.md
 python scripts/dev/record_fixtures.py --check   # recorded API fixtures are current
 ```
 
-The gates underneath take the same arguments and are safe to call directly:
+The gates underneath take the same arguments and are safe to call directly - and they
+are what the workflows call, which is why no build or test command line exists
+anywhere else in this repository (not in `.github/workflows/*.yml`, not in a Makefile):
 
 ```bash
-./scripts/ci/lint.sh --no-install         # mypy, ruff, byte-compile, YAML, shell
+./scripts/ci/lint.sh --no-install         # typecheck.sh, then ruff, byte-compile, YAML, shell
+./scripts/ci/typecheck.sh --no-install    # mypy alone
 ./scripts/ci/coverage.sh --no-install     # unittest + pytest + coverage floor
 ./scripts/ci/benchmarks.sh --no-install   # compare against benchmarks/baseline.json
 ./scripts/ci/post_commit.sh --quick       # skip the benchmark
@@ -200,11 +216,12 @@ src/fitbit_monitor/
   ingest/      importer (plan + run), pipeline (dedupe, quarantine), csv_source (export/Takeout), report, runlog
   plugins/     contract.py models.py loader.py registry.py runner.py sinks.py scaffold.py testing.py
     builtin/   resting_trend.py - the reference plugin
-  cli/         common.py auth_cmd.py config_cmd.py db_cmd.py store_cmd.py import_cmd.py plugins_cmd.py alerts_cmd.py dev_cmd.py
+  cli/         common.py auth_cmd.py config_cmd.py db_cmd.py store_cmd.py import_cmd.py plugins_cmd.py alerts_cmd.py report_cmd.py doctor_cmd.py dev_cmd.py
   logsafe.py   health-value redaction for everything that reaches a log handler
 docs/          storage.md, plugins.md, data-import.md, data-policy.md, adr/
-scripts/       dev/{bootstrap,lint,test,bench,check,docs}.sh + record_fixtures.py - what you type;
-               ci/{lint,coverage,benchmarks,post_commit}.sh - the gates; bench/, docs/
+scripts/       _python.sh - the one interpreter resolver; no script guesses at python3
+               dev/{bootstrap,lint,typecheck,test,coverage,bench,check,docs}.sh + record_fixtures.py - what you type;
+               ci/{lint,typecheck,coverage,benchmarks,post_commit}.sh - the gates; bench/, docs/
 tests/         stdlib unittest - runs under pytest or `python -m unittest discover`
 tooling        configured in pyproject.toml, pinned in uv.lock - no config files to drift
 ```

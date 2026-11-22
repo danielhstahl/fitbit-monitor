@@ -182,16 +182,23 @@ a test and a plugin API version integer already protect.
 
 ### 5. CLI framework: `argparse`, and Typer stays out
 
-`fm` is nine command groups and 25 leaf commands, spread over eight modules under
-`cli/`, each registering itself on a shared `ArgumentParser` - and the whole surface is
-stdlib.
+`fm` is nine command groups plus two flat stubs (`report`, `doctor`) - eleven names on
+the top-level parser, 27 leaf commands - spread over ten modules under `cli/`, each
+registering itself on a shared `ArgumentParser`, and the whole surface is stdlib.
+
+The two stubs are declared, not built: the scaffold ticket fixes the command surface
+first so docs, cron lines and tests can name `fm report` before its logic exists, and
+running one prints what it will do, names the commands that do the job today, and exits
+**72** (`os.EX_NOTIMPLEMENTED`) rather than tracebacks or a lie. A command that is not
+built and a command that failed are different facts and a script should be able to tell
+them apart.
 
 Why not Typer (the recommendation), which is Click with type hints:
 
 * Click is a **runtime dependency**, and §2 says the runtime has none. Typer would
   install click plus its own typing machinery into the user's environment so that
   `fm store stats` prints a prettier table.
-* The documented exit-code contract (0/1/2/3/4/5/130, README) is *behaviour*, and
+* The documented exit-code contract (0/1/2/3/4/5/72/130, README) is *behaviour*, and
   Click's exception-to-exit-code mapping would need overriding in the places where it
   has opinions - usage errors happen to be 2, but "no store yet" is 4, and the
   interrupted-import code 130 must survive `SystemExit` unwinding. argparse exits with
@@ -423,7 +430,9 @@ command line.
 |---|---|---|
 | `scripts/dev/bootstrap.sh` | create `.venv`: `uv sync --extra dev` if uv is on PATH, else `python -m venv` + `pip install -e ".[dev]"` | - |
 | `scripts/dev/lint.sh` | type check + lint + byte-compile + YAML/shell parse | `scripts/ci/lint.sh --no-install` |
+| `scripts/dev/typecheck.sh` | mypy alone - the fast "did I break a type" answer | `scripts/ci/typecheck.sh --no-install` |
 | `scripts/dev/test.sh` | full suite + coverage floor | `scripts/ci/coverage.sh --no-install` |
+| `scripts/dev/coverage.sh` | the same gate under the name CI calls it, so "run the coverage gate" is answerable by name | `scripts/ci/coverage.sh --no-install` |
 | `scripts/dev/bench.sh` | perf gate vs the baseline; passes through `--update-baseline`, `--days`, `--json` | `scripts/ci/benchmarks.sh --no-install` |
 | `scripts/dev/check.sh` | all three, the way CI runs them; `--quick` skips the benchmark | `scripts/ci/post_commit.sh` |
 | `scripts/dev/docs.sh` | regenerate the generated API-reference block in `docs/plugins.md` | `scripts/docs/api_reference.py` |
@@ -443,6 +452,14 @@ Both workflows stay thin: `ci.yml` runs `uv run --locked --extra dev --python <m
 `coverage.xml`; `benchmark.yml` does the same with `benchmarks.sh`. `--locked` is what
 makes a stale `uv.lock` a CI failure, which is the difference between a pin and a
 suggestion.
+
+Two properties of the wrappers are tested rather than trusted (`tests/test_tooling.py`):
+every `scripts/dev` gate wrapper names exactly one `scripts/ci` gate and passes
+`--no-install`, and running the wrapper with `$PYTHON` replaced by a recording stub
+shows both the gate's real command line (`-m mypy`, `-m ruff check`, `-m coverage run`,
+`scripts/bench/bench_plugin_system.py`) and the gate's exit code arriving unchanged at
+the wrapper. That is what "all build and test logic lives in the scripts, and CI can
+call them unchanged" means when a test enforces it.
 
 After every commit, `scripts/ci/post_commit.sh` runs the same trio locally (and is
 what an act-mcp style runner calls, since it needs the repository root that holds

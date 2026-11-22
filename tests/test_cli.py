@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,13 @@ from datetime import date
 from pathlib import Path
 
 from fitbit_monitor.cli import build_parser, main
+from fitbit_monitor.cli.common import (
+    EXIT_ERROR,
+    EXIT_NOT_IMPLEMENTED,
+    EXIT_NO_STORE,
+    EXIT_OK,
+    EXIT_USAGE,
+)
 from fitbit_monitor.store.writer import SeriesStore
 
 import support
@@ -459,6 +467,79 @@ class ConfigAndPathsTest(CliTestCase):
         config.write_text(f'[store]\npath = "{self.home / "from-config.sqlite3"}"\n')
         self.fm("--config", str(config), "dev", "seed", "--days", "3", "--end", "2026-05-31", expect=0)
         self.assertTrue((self.home / "from-config.sqlite3").exists())
+
+
+class CommandSurfaceTest(CliTestCase):
+    """The scaffold contract: the whole command surface exists, and `--help` works.
+
+    A command may be a stub before it is built, but it must be *in* the parser so a
+    doc page, a cron line or a test can name it, it must explain itself with `--help`,
+    and it must fail as a stub (code 72, one line of prose) instead of as a traceback.
+    """
+
+    #: the names the scaffold ticket promises a user will find in `fm --help`
+    REQUIRED = ["auth", "import", "store", "plugins", "report", "db", "doctor", "config"]
+    #: the two that are declared but not built yet
+    STUBS = ["report", "doctor"]
+
+    def _top_level(self) -> dict:
+        return build_parser()._subparsers._group_actions[0].choices
+
+    def test_top_level_help_exits_zero_and_names_every_subcommand(self) -> None:
+        code, text = self.fm("--help")
+        self.assertEqual(code, 0)
+        self.assertIn("usage", text.lower())
+        for name in self.REQUIRED:
+            self.assertIn(name, text, f"`fm --help` does not list {name}")
+
+    def test_the_parser_and_the_help_text_agree(self) -> None:
+        """`--help` truncates nothing that matters: every group is registered *and* shown."""
+        _, text = self.fm("--help")
+        for name in self._top_level():
+            self.assertIn(name, text)
+
+    def test_every_subcommand_has_working_help(self) -> None:
+        for name in self._top_level():
+            with self.subTest(command=name):
+                code, text = self.fm(name, "--help")
+                self.assertEqual(code, 0)
+                self.assertIn("usage", text.lower())
+                self.assertNotIn("Traceback", text)
+
+    def test_stubs_report_themselves_as_not_implemented(self) -> None:
+        for name in self.STUBS:
+            with self.subTest(command=name):
+                code, text = self.fm(name)
+                self.assertEqual(code, EXIT_NOT_IMPLEMENTED, text)
+                self.assertIn("not implemented", text)
+                self.assertIn("--help", text, "a stub says where to read more")
+                self.assertNotIn("Traceback", text)
+
+    def test_not_implemented_is_a_code_of_its_own(self) -> None:
+        """Distinct from every code the working commands use, and from the sysexits value."""
+        with self.subTest("sysexits"):
+            if hasattr(os, "EX_NOTIMPLEMENTED"):
+                self.assertEqual(EXIT_NOT_IMPLEMENTED, os.EX_NOTIMPLEMENTED)
+        for other in (EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_NO_STORE):
+            self.assertNotEqual(EXIT_NOT_IMPLEMENTED, other)
+
+    def test_a_bare_group_never_tracebacks(self) -> None:
+        """`fm store` with no leaf command is a usage error with usage text, not a stack."""
+        for name in self._top_level():
+            if name in self.STUBS or name == "import":
+                continue  # `fm import` is itself a command, not just a group
+            with self.subTest(command=name):
+                code, text = self.fm(name)
+                self.assertEqual(code, EXIT_USAGE)
+                self.assertIn("usage", text.lower())
+                self.assertNotIn("Traceback", text)
+
+    def test_bare_import_says_what_is_missing_instead_of_traceback(self) -> None:
+        """`fm import` with nothing set up fails as a report, not as a stack trace."""
+        code, text = self.fm("import")
+        self.assertIn(code, (EXIT_ERROR, EXIT_USAGE, EXIT_NO_STORE), text)
+        self.assertTrue(text.strip(), "a refused command should say why")
+        self.assertNotIn("Traceback", text)
 
 
 if __name__ == "__main__":  # pragma: no cover

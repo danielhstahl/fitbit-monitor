@@ -45,7 +45,7 @@ run() {
     fi
 }
 
-run "type check" ./scripts/ci/lint.sh --no-install
+run "type check + lint" ./scripts/ci/lint.sh --no-install
 run "tests + coverage" ./scripts/ci/coverage.sh --no-install
 if [[ "$QUICK" -eq 1 ]]; then
     log "benchmarks"

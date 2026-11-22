@@ -8,7 +8,10 @@ ticket cannot quietly re-litigate it:
 * the ``dev`` extra is exactly what the gate scripts call, and the runtime extra is
   still empty - "no dependencies" is a feature (ADR-0001 §2);
 * the retired tool stays retired (pyflakes, §10);
-* the ``scripts/dev`` entrypoints exist, are executable, and are documented (§12).
+* the ``scripts/dev`` entrypoints exist, are executable, and are documented (§12);
+* the five gate entrypoints are *wrappers*: they call a ``scripts/ci`` gate with
+  ``--no-install`` and carry its exit code, so no logic hides in a wrapper and no
+  failure goes unreported (§12).
 
 ``uv`` is optional in a test environment, so the lockfile check that needs the binary
 skips itself instead of failing a contributor who installed with pip.
@@ -18,9 +21,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -29,7 +34,20 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
-DEV_ENTRYPOINTS = ["bootstrap.sh", "lint.sh", "test.sh", "bench.sh", "check.sh", "docs.sh"]
+DEV_ENTRYPOINTS = [
+    "bootstrap.sh",
+    "lint.sh",
+    "typecheck.sh",
+    "test.sh",
+    "coverage.sh",
+    "bench.sh",
+    "check.sh",
+    "docs.sh",
+]
+
+#: The five the scaffold ticket names as the developer's surface: each must exist,
+#: be executable, and exit nonzero when the gate underneath fails.
+GATE_ENTRYPOINTS = ["test.sh", "lint.sh", "typecheck.sh", "coverage.sh", "bench.sh"]
 
 
 def _pyproject() -> dict:
@@ -160,6 +178,85 @@ class DevEntrypointTest(unittest.TestCase):
         self.assertIn("- **Status:** accepted", text)
         for topic in ("uv", "sqlite3", "pytest", "coverage", "ruff", "mypy", "argparse", "Rejected"):
             self.assertIn(topic, text)
+
+
+class GateWrapperTest(unittest.TestCase):
+    """A ``scripts/dev`` gate wrapper has exactly two jobs: call the gate, carry the code.
+
+    The wrapper is run against a stand-in interpreter that just records what it was
+    asked to do and exits on command. That checks the two properties a wrapper must
+    have - it really delegates to a ``scripts/ci`` gate, and a failing gate fails the
+    wrapper - without waiting on the real toolchain, and without trusting the wrapper
+    to say so in a comment.
+    """
+
+    def _wrapper(self, script: str) -> Path:
+        return REPO / "scripts" / "dev" / script
+
+    def _run_stubbed(self, script: str, exit_code: int) -> tuple[subprocess.CompletedProcess, list[str]]:
+        """Run scripts/dev/{script} with $PYTHON replaced by a recording stub.
+
+        Returns the process and the list of command lines the gates actually asked the
+        interpreter to run - the evidence that the wrapper delegates.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        trace = Path(tmp.name) / "calls.log"
+        stub = Path(tmp.name) / "python"
+        stub.write_text(f"#!/usr/bin/env bash\necho \"$*\" >> {trace}\nexit {exit_code}\n")
+        stub.chmod(0o755)
+        env = dict(os.environ, PYTHON=str(stub))
+        result = subprocess.run(
+            [str(self._wrapper(script))],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+        calls = [line for line in trace.read_text().splitlines() if line.strip()] if trace.exists() else []
+        return result, calls
+
+    def test_gate_entrypoints_delegate_to_a_ci_gate_without_installing(self) -> None:
+        """Every gate wrapper names one scripts/ci gate and passes --no-install."""
+        for name in GATE_ENTRYPOINTS:
+            text = self._wrapper(name).read_text()
+            gates = sorted(set(re.findall(r"scripts/ci/[a-z_]+\.sh", text)))
+            self.assertEqual(len(gates), 1, f"{name}: expected one gate underneath, found {gates}")
+            gate = REPO / gates[0]
+            self.assertTrue(gate.is_file(), f"{name} calls {gates[0]}, which does not exist")
+            self.assertTrue(os.access(gate, os.X_OK), f"{gates[0]} is not executable")
+            self.assertIn("--no-install", text, f"{name} would re-install its own toolchain")
+
+    def test_wrapper_exits_zero_when_the_gate_passes(self) -> None:
+        for name in GATE_ENTRYPOINTS:
+            with self.subTest(script=name):
+                result, calls = self._run_stubbed(name, exit_code=0)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(calls, f"{name} finished without running a gate at all")
+
+    def test_wrapper_exits_nonzero_when_the_gate_fails(self) -> None:
+        """A failing gate has to fail the wrapper - a silent green is the worst outcome."""
+        for name in GATE_ENTRYPOINTS:
+            with self.subTest(script=name):
+                result, _ = self._run_stubbed(name, exit_code=1)
+                self.assertNotEqual(result.returncode, 0, f"{name} swallowed a failing gate")
+
+    def test_gate_runs_the_documented_tool_and_nothing_private(self) -> None:
+        """The recorded command lines are the tools the ADR names - not a private copy."""
+        expected = {
+            "typecheck.sh": ["-m mypy"],
+            "lint.sh": ["-m mypy", "-m ruff check"],
+            "coverage.sh": ["-m unittest", "-m coverage run", "-m coverage report", "-m coverage xml"],
+            "test.sh": ["-m unittest", "-m coverage run"],
+            "bench.sh": ["scripts/bench/bench_plugin_system.py"],
+        }
+        for name, needles in expected.items():
+            with self.subTest(script=name):
+                _, calls = self._run_stubbed(name, exit_code=0)
+                joined = "\n".join(calls)
+                for needle in needles:
+                    self.assertIn(needle, joined, f"{name} did not run `{needle}`:\n{joined}")
 
 
 if __name__ == "__main__":

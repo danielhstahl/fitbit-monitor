@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -31,6 +32,11 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_NO_STORE = 4
+#: A command that is in the parser, documented, and does nothing yet. Distinct from
+#: EXIT_ERROR on purpose: "you asked for a thing this build does not have" is not the
+#: same failure as "the thing ran and failed", and a script must be able to tell them.
+#: Same value as ``os.EX_NOTIMPLEMENTED`` (sysexits 72).
+EXIT_NOT_IMPLEMENTED = 72
 
 
 @dataclass
@@ -159,6 +165,21 @@ def print_json(payload: Any) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
 
 
+def not_implemented(command: str, *, planned: str, instead: Sequence[str] = ()) -> int:
+    """Say plainly that a scaffolded command does not do anything yet, and give its code.
+
+    The scaffold ticket names the whole command surface up front, so a command can exist
+    before it works. What it must never do is fail quietly or traceback: it prints the
+    one-line status, what will make it real, and which command does this job today.
+    """
+    print(f"{command}: not implemented", file=sys.stderr)
+    print(f"  planned: {planned}", file=sys.stderr)
+    if instead:
+        print(f"  instead: {', '.join(instead)}", file=sys.stderr)
+    print(f"  detail: {command} --help", file=sys.stderr)
+    return EXIT_NOT_IMPLEMENTED
+
+
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     """Flags every command accepts (also settable on the top-level parser)."""
     parser.add_argument("--config", help="path to config.toml (default: $FM_CONFIG or ~/.config/fitbit-monitor/config.toml)")
@@ -196,12 +217,14 @@ def configure_logging(verbose: int, quiet: bool) -> None:
 
 __all__ = [
     "EXIT_ERROR",
+    "EXIT_NOT_IMPLEMENTED",
     "EXIT_NO_STORE",
     "EXIT_OK",
     "EXIT_USAGE",
     "Session",
     "add_common_args",
     "configure_logging",
+    "not_implemented",
     "print_json",
     "render_table",
     "session_from_args",
