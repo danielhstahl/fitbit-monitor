@@ -63,6 +63,12 @@ IMPORT_BOOM = '''
 raise RuntimeError("this file explodes on import")
 '''
 
+EXIT_AT_IMPORT = '''
+import sys
+
+sys.exit(4)
+'''
+
 NOT_A_PLUGIN = '''
 VALUE = 3
 
@@ -146,6 +152,18 @@ class DirectoryDiscoveryTest(unittest.TestCase):
         # ...and the healthy plugin still instantiates and still runs.
         plugin = registry.get("alpha").create()
         self.assertEqual(plugin.name, "alpha")
+
+    def test_exit_at_import_is_isolated_too(self) -> None:
+        """A plugin file that calls sys.exit() must not end `fm plugins list`."""
+        self.write("alpha.py", GOOD)
+        self.write("exit.py", EXIT_AT_IMPORT)
+        registry = self.discover()
+        self.assertEqual([r.name for r in registry.errors()], ["exit"])
+        error = registry.get("exit").error
+        self.assertEqual(error.stage, "import")
+        self.assertIn("SystemExit", str(error))
+        self.assertEqual(registry.names(), ["alpha", "exit"])
+        self.assertTrue(registry.get("alpha").ok)
 
     def test_file_without_a_plugin_is_reported(self) -> None:
         self.write("helper.py", NOT_A_PLUGIN)
@@ -261,6 +279,22 @@ class CollisionTest(unittest.TestCase):
         self.assertEqual(registry.collisions[0].name, "resting_trend")
         self.assertIn("outranks", registry.collisions[0].reason)
 
+    def test_a_name_clash_costs_nobody_else(self) -> None:
+        """The loser is reported and shadowed; every other plugin still loads."""
+        shadow = GOOD.replace('"alpha"', '"resting_trend"')
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            support.write_plugin_file(directory, "override.py", shadow)
+            support.write_plugin_file(directory, "other.py", GOOD.replace('"alpha"', '"other"'))
+            with mock.patch.object(importlib.metadata, "entry_points", return_value=[]):
+                registry = PluginRegistry.discover(
+                    AppConfig._from_raw(None, {"plugins": {"dirs": [str(directory)]}})
+                )
+        self.assertEqual(registry.names(), ["other", "resting_trend"])
+        self.assertEqual([r.name for r in registry.usable()], ["other", "resting_trend"])
+        self.assertEqual(registry.get("resting_trend").kind, "directory")
+        self.assertEqual([c.name for c in registry.collisions], ["resting_trend"])
+
     def test_earlier_directory_wins_over_later(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             first, second = Path(tmp) / "a", Path(tmp) / "b"
@@ -319,14 +353,22 @@ class RegistryApiTest(unittest.TestCase):
                     name="broken",
                     kind="directory",
                     location="/x/broken.py",
-                    error=__import__("fitbit_monitor.plugins.errors", fromlist=["x"]).PluginError("nope"),
+                    error=__import__("fitbit_monitor.plugins.errors", fromlist=["x"]).PluginError(
+                        "nope", hint="look at the file"
+                    ),
                     note="shadowed",
                 )
             ]
         )
         described = registry.as_dicts()[0]
         self.assertEqual(described["error"]["message"], "nope")
+        self.assertEqual(described["error"]["hint"], "look at the file")
+        self.assertEqual(described["error"]["stage"], "discover")
+        self.assertEqual(described["error"]["type"], "PluginError")
         self.assertEqual(described["note"], "shadowed")
+        # Unknown, but never absent: a JSON reader can iterate broken plugins blindly.
+        self.assertIsNone(described["version"])
+        self.assertEqual(described["datasets"], [])
         self.assertEqual(registry.get("broken").row()[1], "-")
 
     def test_candidate_hook_can_replace_discovery(self) -> None:

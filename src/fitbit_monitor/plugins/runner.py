@@ -277,6 +277,8 @@ def _run_one(
         outcome.error_type = type(exc).__name__
         outcome.error_stage = "configure"
         return outcome
+    except KeyboardInterrupt:
+        raise  # Ctrl-C belongs to the host, not to the plugin that happened to be running
     except BaseException as exc:  # noqa: BLE001 - see module docstring
         outcome.status = STATUS_ERROR
         outcome.error = f"{type(exc).__name__}: {exc}"
@@ -312,7 +314,12 @@ def _run_one(
         outcome.error = f"{exc} (budget {budget:g}s)"
         outcome.error_type = "PluginTimeout"
         outcome.error_stage = "timeout"
-    except (FmError, Exception) as exc:  # noqa: BLE001 - isolation is the whole point
+    except KeyboardInterrupt:
+        raise  # Ctrl-C belongs to the host, not to the plugin that happened to be running
+    except BaseException as exc:  # noqa: BLE001 - isolation is the whole point
+        # Deliberately BaseException and not Exception: `sys.exit()` in a plugin - or
+        # any other BaseException - is that plugin's bug, and ending the host (and
+        # every plugin after it) is exactly what this module promises cannot happen.
         outcome.status = STATUS_ERROR
         outcome.error = f"{type(exc).__name__}: {exc}"
         outcome.error_type = type(exc).__name__

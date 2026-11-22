@@ -158,6 +158,64 @@ class PluginsListTest(CliTestCase):
         self.assertIn("failed to load", text)
         self.assertIn("RuntimeError", text)
 
+    def test_a_broken_plugin_carries_its_error_on_its_own_row(self) -> None:
+        """The one question `fm plugins list` answers is *which* plugin is broken."""
+        support.write_plugin_file(self.plugins_dir, "bad.py", BROKEN_PLUGIN)
+        support.write_plugin_file(self.plugins_dir, "good.py", ALERTING_PLUGIN)
+        _, text = self.fm("plugins", "list", "--dir", str(self.plugins_dir), expect=0)
+        rows = [line for line in text.splitlines() if line.startswith("bad")]
+        self.assertEqual(len(rows), 1, text)
+        self.assertIn("directory", rows[0])
+        self.assertIn("error(import):", rows[0])
+        self.assertIn("RuntimeError", rows[0])
+        # the healthy plugin's row carries no error, and the hint is readable below
+        healthy = [line for line in text.splitlines() if line.startswith("nightly_dip")]
+        self.assertEqual(len(healthy), 1, text)
+        self.assertNotIn("error(", healthy[0])
+        self.assertIn("hint", text)
+
+    def test_list_json_names_the_dirs_searched_and_the_reason_each_plugin_is_broken(self) -> None:
+        support.write_plugin_file(self.plugins_dir, "bad.py", BROKEN_PLUGIN)
+        _, text = self.fm("plugins", "list", "--dir", str(self.plugins_dir), "--json", expect=0)
+        payload = json.loads(text)
+        self.assertIn(str(self.plugins_dir), payload["plugin_dirs"])
+        broken = [p for p in payload["plugins"] if "error" in p]
+        self.assertEqual(len(broken), 1)
+        self.assertEqual(broken[0]["name"], "bad")
+        self.assertEqual(broken[0]["source"], "directory")
+        self.assertEqual(broken[0]["error"]["stage"], "import")
+        self.assertEqual(broken[0]["error"]["type"], "PluginImportError")
+        self.assertIn("RuntimeError", broken[0]["error"]["message"])
+        self.assertIsNone(broken[0]["version"])
+        self.assertEqual(broken[0]["datasets"], [])
+
+    def test_long_error_messages_are_cut_to_fit_the_table(self) -> None:
+        from fitbit_monitor.cli import plugins_cmd
+        from fitbit_monitor.plugins.errors import PluginError
+
+        self.assertEqual(plugins_cmd.error_cell(None), "")
+        cell = plugins_cmd.error_cell(PluginError("boom " * 60, plugin="long_winded"))
+        self.assertTrue(cell.startswith("error(discover): boom"), cell[:40])
+        self.assertTrue(cell.endswith("\u2026"), cell[-20:])
+        self.assertLessEqual(len(cell), plugins_cmd.ERROR_CELL_WIDTH + len("error(discover): "))
+        self.assertNotIn("\n", cell, "a cell must stay on one line or the table skews")
+
+    def test_no_plugins_found_says_where_it_looked(self) -> None:
+        from unittest import mock
+
+        from fitbit_monitor.plugins import registry as registry_module
+
+        empty = self.home / "nothing-here"
+        empty.mkdir()
+        nothing = mock.patch.object(registry_module, "iter_builtin_candidates", return_value=[])
+        no_metadata = mock.patch.object(registry_module, "iter_entry_point_candidates", return_value=[])
+        with nothing, no_metadata:
+            _, text = self.fm("plugins", "list", "--dir", str(empty), expect=0)
+            self.assertIn("no plugins found", text)
+            self.assertIn(str(empty), text)
+            _, text = self.fm("plugins", "list", expect=0)
+            self.assertIn("(none configured)", text)
+
     def test_show_reports_options_and_effective_config(self) -> None:
         _, text = self.fm("plugins", "show", "resting_trend", expect=0)
         self.assertIn("lookback_weeks", text)

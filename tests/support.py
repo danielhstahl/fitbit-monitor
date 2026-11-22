@@ -6,6 +6,7 @@ Deliberately importable as ``support`` from both pytest and ``unittest discover`
 
 from __future__ import annotations
 
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -193,6 +194,46 @@ class BadModelPlugin(MonitorPlugin):
         ctx.metric("nope", 1.0, confidence=4.0)
 
 
+class ExitRunPlugin(MonitorPlugin):
+    """Calls ``sys.exit()`` inside run() - the BaseException case of run isolation.
+
+    A plugin reaching for SystemExit is a plugin that thinks it owns the process.
+    It does not: the host reports it and carries on with the next plugin.
+    """
+
+    name = "exit_run_plugin"
+    summary = "exits the interpreter from run()"
+    datasets = ("daily_summary",)
+
+    def run(self, ctx: PluginContext) -> None:
+        sys.exit(3)
+
+
+class ExitConfigurePlugin(MonitorPlugin):
+    """Calls ``sys.exit()`` while being configured."""
+
+    name = "exit_configure_plugin"
+    summary = "exits the interpreter from configure()"
+    datasets = ("daily_summary",)
+
+    def run(self, ctx: PluginContext) -> None:
+        raise AssertionError("must not run")
+
+    def configure(self, config) -> None:
+        sys.exit(4)
+
+
+class InterruptRunPlugin(MonitorPlugin):
+    """Raises KeyboardInterrupt in run() - the one exception the host re-raises."""
+
+    name = "interrupt_run_plugin"
+    summary = "simulates Ctrl-C inside run()"
+    datasets = ("daily_summary",)
+
+    def run(self, ctx: PluginContext) -> None:
+        raise KeyboardInterrupt
+
+
 def make_config(
     sections: Mapping[str, Mapping[str, Any]] | None = None,
     *,
@@ -220,8 +261,11 @@ def temp_dir(prefix: str = "fm-test-"):
 __all__ = [
     "BadModelPlugin",
     "ConfigurePlugin",
+    "ExitConfigurePlugin",
+    "ExitRunPlugin",
     "FIXTURE_END",
     "IgnoringSlowPlugin",
+    "InterruptRunPlugin",
     "NoDataPlugin",
     "OkPlugin",
     "ReturningPlugin",

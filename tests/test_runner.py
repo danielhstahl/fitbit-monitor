@@ -41,6 +41,8 @@ PLUGINS = [
     support.IgnoringSlowPlugin,
     support.ReturningPlugin,
     support.BadModelPlugin,
+    support.ExitRunPlugin,
+    support.ExitConfigurePlugin,
 ]
 
 
@@ -168,6 +170,34 @@ class RunnerTest(unittest.TestCase):
             ["configure_plugin"], config=support.make_config({"configure_plugin": {"mode": "safe"}})
         )
         self.assertEqual(self.outcome(report, "configure_plugin").status, STATUS_OK)
+
+    def test_system_exit_in_run_is_the_plugin_error_not_the_end_of_the_run(self) -> None:
+        """`sys.exit()` in a plugin is a BaseException, and still only that plugin's problem."""
+        report = self.run_names(["exit_run_plugin", "ok_plugin"])
+        outcome = self.outcome(report, "exit_run_plugin")
+        self.assertEqual(outcome.status, STATUS_ERROR)
+        self.assertEqual(outcome.error_stage, "run")
+        self.assertEqual(outcome.error_type, "SystemExit")
+        self.assertIn("3", outcome.error)
+        self.assertEqual(self.outcome(report, "ok_plugin").status, STATUS_OK)
+        self.assertEqual(self.outcome(report, "ok_plugin").metrics[0].key, "mean_resting_hr")
+        self.assertEqual(report.exit_code, EXIT_PLUGIN_ERROR)
+
+    def test_system_exit_in_configure_is_the_plugin_error_not_the_end_of_the_run(self) -> None:
+        report = self.run_names(["exit_configure_plugin", "ok_plugin"])
+        outcome = self.outcome(report, "exit_configure_plugin")
+        self.assertEqual(outcome.status, STATUS_ERROR)
+        self.assertEqual(outcome.error_stage, "configure")
+        self.assertEqual(outcome.error_type, "SystemExit")
+        self.assertEqual(self.outcome(report, "ok_plugin").status, STATUS_OK)
+
+    def test_keyboard_interrupt_belongs_to_the_host_not_the_plugin(self) -> None:
+        """Ctrl-C must not be swallowed and filed as one plugin's bad day."""
+        registry = PluginRegistry._resolve([support.candidate(support.InterruptRunPlugin)])
+        with self.assertRaises(KeyboardInterrupt):
+            run_plugins(
+                registry, self.store, support.window(), config=support.make_config(), names=["interrupt_run_plugin"], timeout=5
+            )
 
     def test_invalid_model_from_a_plugin_is_a_run_error(self) -> None:
         outcome = self.outcome(self.run_names(["bad_model_plugin"]), "bad_model_plugin")

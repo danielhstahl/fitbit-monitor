@@ -65,6 +65,12 @@ class PluginRecord:
         return self.plugin_class()
 
     def describe(self) -> dict[str, Any]:
+        """The JSON view of one plugin, healthy or broken.
+
+        The keys a consumer can always expect are name, source, location, version and
+        datasets: a plugin that never loaded reports them as unknown rather than
+        omitting them, so `fm plugins list --json` can be iterated blindly.
+        """
         out: dict[str, Any] = {
             "name": self.name,
             "source": self.kind,
@@ -72,8 +78,18 @@ class PluginRecord:
         }
         if self.plugin_class is not None:
             out.update(self.plugin_class.describe())
+        else:
+            out["version"] = None
+            out["datasets"] = []
         if self.error is not None:
-            out["error"] = {"stage": self.error.stage, "message": str(self.error)}
+            error: dict[str, Any] = {
+                "stage": self.error.stage,
+                "type": type(self.error).__name__,
+                "message": self.error.message,
+            }
+            if self.error.hint:
+                error["hint"] = self.error.hint
+            out["error"] = error
         if self.note:
             out["note"] = self.note
         return out

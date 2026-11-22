@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
+from pathlib import Path
+from typing import Any, Sequence
 
 from ..errors import FmError
 from ..plugins.contract import PLUGIN_API_VERSION
+from ..plugins.errors import PluginError
 from ..plugins.registry import PluginRecord
 from ..plugins.runner import run_plugins
 from ..plugins.scaffold import scaffold_plugin
@@ -96,37 +98,66 @@ def register(sub: "argparse._SubParsersAction") -> None:
     pnew.set_defaults(func=cmd_plugin_new)
 
 
+#: Longest error text the table prints before it is cut with an ellipsis.
+ERROR_CELL_WIDTH = 96
+
+
 # --- commands ---------------------------------------------------------------
 def cmd_plugins_list(args: argparse.Namespace, session: Session) -> int:
     registry = session.registry(args.dir)
+    searched = searched_dirs(session, args.dir)
     if getattr(args, "json", False):
         print_json(
             {
                 "plugin_api_version": PLUGIN_API_VERSION,
-                "plugin_dirs": [str(p) for p in session.config.plugin_dirs],
+                "plugin_dirs": [str(p) for p in searched],
                 "plugins": registry.as_dicts(),
                 "collisions": [c.as_dict() for c in registry.collisions],
             }
         )
         return EXIT_OK
-    rows = [record.row() for record in registry]
-    for record in registry.errors():
-        if record.error is not None:
-            rows.append(("", "", "", f"error({record.error.stage}): {record.error}"))
     if not registry:
-        dirs = ", ".join(str(p) for p in session.config.plugin_dirs) or "(none configured)"
+        dirs = ", ".join(str(p) for p in searched) or "(none configured)"
         print("no plugins found")
         print(f"  searched the fitbit_monitor.plugins entry-point group and these plugins dirs: {dirs}")
         print("  scaffold one with `fm plugin new my_plugin --dir <dir>`")
         return EXIT_OK
-    print(render_table(("NAME", "VERSION", "SOURCE", "DATASETS"), rows))
+    broken = registry.errors()
+    headers: tuple[str, ...] = ("NAME", "VERSION", "SOURCE", "DATASETS")
+    rows = [list(record.row()) for record in registry.records]
+    if broken:
+        # A plugin that failed to load still gets a row: name, source and the reason,
+        # on the same line, because "which one is broken" is the only question asked
+        # here. The hint that goes with it is printed under the table, where it fits.
+        headers += ("ERROR",)
+        for row, record in zip(rows, registry.records):
+            row.append("" if record.ok else error_cell(record.error))
+    print(render_table(headers, rows))
+    for record in broken:
+        hint = record.error.hint if record.error else None
+        if hint:
+            print(f"  hint  {record.name}: {hint}")
     for collision in registry.collisions:
         print(f"note: {collision.name} declared twice; using {collision.winner} "
               f"(shadowed {collision.loser}: {collision.reason})")
-    broken = len(registry.errors())
     if broken:
-        print(f"\n{broken} plugin(s) failed to load - run `fm plugins validate` for detail")
+        print(f"\n{len(broken)} plugin(s) failed to load - run `fm plugins validate` for detail")
     return EXIT_OK
+
+
+def searched_dirs(session: Session, extra: Sequence[str] = ()) -> list[Path]:
+    """Every drop-in directory this invocation looked in, in precedence order."""
+    return list(session.config.plugin_dirs) + [Path(d).expanduser() for d in extra]
+
+
+def error_cell(error: PluginError | None) -> str:
+    """One table cell: `error(stage): message`, collapsed to a single line."""
+    if error is None:
+        return ""
+    text = " ".join(str(error.message).split())
+    if len(text) > ERROR_CELL_WIDTH:
+        text = text[: ERROR_CELL_WIDTH - 1].rstrip() + "\u2026"
+    return f"error({error.stage}): {text}"
 
 
 def cmd_plugins_show(args: argparse.Namespace, session: Session) -> int:
@@ -146,12 +177,13 @@ def cmd_plugins_show(args: argparse.Namespace, session: Session) -> int:
     if args.json:
         print_json(info)
         return EXIT_OK if record.ok else EXIT_ERROR
-    print(f"{info.get('name', args.name)} {info.get('version', '')}".rstrip())
+    print(f"{info.get('name', args.name)} {info.get('version') or ''}".rstrip())
     if info.get("summary"):
         print(f"  {info['summary']}")
     print(f"  source:     {record.kind} ({record.location})")
     print(f"  datasets:   {', '.join(info.get('datasets') or []) or '(none declared)'}")
-    print(f"  plugin api: {info.get('requires_api')}")
+    if info.get("requires_api") is not None:
+        print(f"  plugin api: {info['requires_api']}")
     if "enabled" in info:
         print(f"  enabled:    {'yes' if info['enabled'] else 'no'}")
     options = info.get("options") or []
@@ -292,4 +324,4 @@ def plugin_api_version() -> int:
     return PLUGIN_API_VERSION
 
 
-__all__ = ["register"]
+__all__ = ["error_cell", "register", "searched_dirs"]

@@ -247,10 +247,19 @@ dirs = ["~/fm-plugins"]     # my override wins over the installed one
 
 ```console
 $ fm plugins list
-NAME           VERSION  SOURCE     DATASETS
+NAME           VERSION  SOURCE     DATASETS                        ERROR
+bad_idea       -        directory  -                               error(import): plugin file bad_idea.py raised RuntimeError while importing: boom
 resting_trend  0.1.0    directory  daily_summary, hrv, heart_rate
+  hint  bad_idea: run `python -c "import ..."` on the file to see the traceback
 note: resting_trend declared twice; using /home/you/fm-plugins/resting_trend.py (shadowed fitbit_monitor.plugins.builtin.RestingTrendPlugin: directory outranks builtin)
+
+1 plugin(s) failed to load - run `fm plugins validate` for detail
 ```
+
+A plugin that failed to load still gets a row - name, source, and why - because
+"which one is broken" is the only question asked here. `fm plugins list --json`
+says the same thing in `plugins[].error`, with `stage`, `type`, `message` and
+`hint`, and lists the directories it searched in `plugin_dirs`.
 
 ---
 
@@ -261,10 +270,12 @@ can fail at any point, and none of those failures is allowed to be fatal:
 
 | failure | when | what you see |
 |---|---|---|
-| import error | module raises while loading | `fm plugins list` shows the plugin with `error(import): …`; everything else still loads |
+| import error | module raises while loading | `fm plugins list` shows the plugin's own row with `error(import): …`; everything else still loads |
 | registration error | not a `MonitorPlugin`, abstract, bad `name`/`version`, needs a newer API | `error(register): plugin 'x' does not implement the required interface: run` |
 | config error | `configure()` rejects the section, or a value will not coerce | run reports `MISCONFIGURED`, exit 1 |
 | run error | anything raised inside `run()` | `ERROR (run) - RuntimeError: boom`; the other plugins still ran |
+| `sys.exit()` in a plugin | `run()` or `configure()` raises a `BaseException` | reported as that plugin's `error` like any other - a plugin cannot end the host |
+| Ctrl-C | the user interrupts | re-raised, never filed as a plugin's error: an interrupt belongs to the host |
 | timeout | budget exceeded | `TIMEOUT - exceeded 0.2s wall-clock budget` |
 
 A plugin is executed on its own worker thread with a wall-clock budget
