@@ -27,6 +27,27 @@ echo "== byte-compile package, scripts and tests"
 "$PYTHON" -m compileall -q src scripts tests
 
 echo
+echo "== GitHub workflow YAML parses (act-mcp runs these same workflows locally)"
+"$PYTHON" - <<'PYEOF'
+import glob
+import sys
+import yaml
+
+paths = sorted(glob.glob(".github/workflows/*.yml"))
+if not paths:
+    print("FAIL  no .github/workflows/*.yml found", file=sys.stderr)
+    raise SystemExit(1)
+for path in paths:
+    with open(path) as handle:
+        doc = yaml.safe_load(handle)
+    jobs = (doc or {}).get("jobs") or {}
+    if not jobs:
+        print(f"FAIL  {path} declares no jobs", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"ok  {path} ({', '.join(jobs)})")
+PYEOF
+
+echo
 echo "== shell scripts parse"
 for script in scripts/ci/*.sh; do
     bash -n "$script"
