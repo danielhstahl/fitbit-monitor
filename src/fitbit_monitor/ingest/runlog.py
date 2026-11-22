@@ -135,6 +135,25 @@ class RunLog:
         row = self.conn.execute("SELECT run_id FROM dataset_run ORDER BY id DESC LIMIT 1").fetchone()
         return row["run_id"] if row else None
 
+    def outcomes(self, source: str | None = None) -> dict[str, dict[str, Any]]:
+        """Each dataset's most recent outcome: status, error, run and start time.
+
+        ``fm import watermarks`` prints this beside the watermark, because "how far did
+        it get" and "how did it end" are one question in practice.
+        """
+        sql = "SELECT dataset, source, status, error, run_id, started_at FROM dataset_run"
+        if source:
+            sql += " WHERE source = ?"
+            rows = self.conn.execute(sql, (source,))
+        else:
+            rows = self.conn.execute(sql)
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:  # ordered by rowid, so the last write per dataset wins
+            latest[row["dataset"]] = dict(row)
+        for entry in latest.values():
+            entry.pop("source", None)
+        return latest
+
     def last_window(self, run_id: str | None = None) -> tuple[date, date] | None:
         """The ``--since/--until`` a previous run was asked for (default: the last one).
 

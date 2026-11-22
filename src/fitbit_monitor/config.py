@@ -33,6 +33,7 @@ Layout of the file::
     [import]
     timezone = "UTC"
     recent_days = 7
+    overlap_days = 1
     [import.chunk_days]
     hrv = 7
 """
@@ -258,6 +259,10 @@ class ImportSettings:
 
     timezone: str = "UTC"
     recent_days: int = 7
+    #: Re-fetch this many already-imported days on the next run: Fitbit recalculates
+    #: sleep and HRV after a late sync, and idempotent ingest makes the re-fetch free
+    #: in correctness terms and one request per dataset in cost terms.
+    overlap_days: int = 1
     chunk_days: Mapping[str, int] = field(default_factory=dict)
     rate_limit_reserve: int = 5
     max_wait_seconds: float = 90.0
@@ -348,6 +353,7 @@ class AppConfig:
             import_=ImportSettings(
                 timezone=str(import_.get("timezone") or "UTC"),
                 recent_days=max(1, int(import_.get("recent_days", 7))),
+                overlap_days=max(0, int(import_.get("overlap_days", 1))),
                 chunk_days={str(k): int(v) for k, v in (import_.get("chunk_days") or {}).items()},
                 rate_limit_reserve=int(import_.get("rate_limit_reserve", 5)),
                 max_wait_seconds=float(import_.get("max_wait_seconds", 90)),

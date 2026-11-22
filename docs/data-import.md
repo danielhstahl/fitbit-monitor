@@ -43,9 +43,15 @@ Three mechanisms, all visible in the report:
 | content hash | `raw_payload.content_hash` | the same body is stored once; `payloads_duplicate` counts the rest |
 | row upsert on `(dataset, ts_utc)` | `series` | re-importing a day merges values (`UPDATE ... SET payload = json_patch(...)`) instead of overwriting or duplicating; `rows_duplicate` counts them |
 | forward-only watermark | `dataset_watermark` | the next import starts the day after the last one that fully succeeded, per dataset and per source |
+| overlap window | `[import] overlap_days = 1` | the last day or two is re-read on the next run, because Fitbit recalculates sleep and HRV after a late sync; a dataset already current through the end is left alone |
 
 `fm import --since 2026-05-01 --until 2026-05-14` twice in a row is a supported
 thing to do: the second run costs requests and adds no rows.
+
+One writer per store: while an import is running, a second `fm import` against the
+same database is refused ("already writing ... wait for it to finish") rather than
+interleaving chunks or fighting over the rate-limit budget. The lock is an advisory
+`flock` beside the file, so a crashed import never leaves the store locked.
 
 ## Planning before spending
 
@@ -110,8 +116,10 @@ Failures are per dataset, and the run reports *partial* rather than pretending:
 
 `fm import history`, `fm import watermarks` and `fm import report` answer "what did
 that run do?" afterwards - the history lives in the `dataset_run` table, one row per
-dataset per run, and each run also writes a JSON report to
+dataset per run (with its error), and each run also writes a JSON report to
 `<data-dir>/imports/<run-id>.json` (the last `[import] report_keep` of them).
+`fm import watermarks` joins in each dataset's last status, so "how far did it get"
+and "how did it end" are one table.
 
 ## Backfilling from a CSV export
 
@@ -146,6 +154,7 @@ retries = 3
 [import]
 timezone = "Europe/Berlin"            # what Fitbit's un-offset timestamps mean
 recent_days = 7                       # default window when there is no watermark
+overlap_days = 1                      # re-read this many imported days for late corrections
 rate_limit_reserve = 5                # stop with fewer than this many left
 max_wait_seconds = 90                 # do not sleep longer than this for a limit
 confirm_above_requests = 2000         # ask before a pull this big

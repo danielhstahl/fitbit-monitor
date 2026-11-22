@@ -48,7 +48,7 @@ from ..ingest.pipeline import Ingest
 from ..ingest.report import EXIT_INTERRUPTED, ImportReport
 from ..ingest.runlog import RunLog
 from ..store.watermarks import Watermarks
-from ..store.writer import SeriesStore
+from ..store.writer import SeriesStore, write_lock
 from .common import EXIT_NO_STORE, EXIT_OK, Session, print_json, render_table
 
 
@@ -166,6 +166,10 @@ def cmd_import(args: argparse.Namespace, session: Session) -> int:
             raise NotAuthenticatedError(f"not authenticated: no credentials at {session.credentials().path}")
     try:
         with ExitStack() as stack:
+            if not args.dry_run:
+                # One import at a time per store: chunks, watermarks and the shared
+                # rate-limit budget all assume a single writer.
+                stack.enter_context(write_lock(session.store_path, what="an fm import"))
             store = _store_for(args, session)
             stack.callback(store.close)
             ingest = Ingest(store, source=source)
@@ -413,7 +417,7 @@ def cmd_import_history(args: argparse.Namespace, session: Session) -> int:
             return EXIT_OK
         print(
             render_table(
-                ("STARTED", "RUN", "DATASET", "SOURCE", "STATUS", "NEW", "REQS", "WATERMARK", "RANGE"),
+                ("STARTED", "RUN", "DATASET", "SOURCE", "STATUS", "NEW", "REQS", "WATERMARK", "RANGE", "ERROR"),
                 [
                     (
                         str(r["started_at"])[:19],
@@ -425,6 +429,7 @@ def cmd_import_history(args: argparse.Namespace, session: Session) -> int:
                         r["requests"],
                         r["watermark"] or "-",
                         f"{str(r['since'])[:10]}..{str(r['until'])[:10]}",
+                        (r["error"] or "-")[:70],
                     )
                     for r in runs
                 ],
@@ -479,15 +484,21 @@ def cmd_import_watermarks(args: argparse.Namespace, session: Session) -> int:
         return EXIT_NO_STORE
     try:
         marks = Watermarks(store).all(source=args.source)
+        outcomes = RunLog(store).outcomes(args.source)
         if args.json:
-            print_json({"watermarks": [m.as_dict() for m in marks]})
+            payload = []
+            for mark in marks:
+                entry = mark.as_dict()
+                entry.update(outcomes.get(mark.dataset, {}))
+                payload.append(entry)
+            print_json({"watermarks": payload})
             return EXIT_OK
         if not marks:
             print("no watermarks yet - every dataset will start from its default --since")
             return EXIT_OK
         print(
             render_table(
-                ("DATASET", "SOURCE", "LAST DAY", "LAST POINT", "UPDATED"),
+                ("DATASET", "SOURCE", "LAST DAY", "LAST POINT", "UPDATED", "LAST STATUS", "ERROR"),
                 [
                     (
                         m.dataset,
@@ -495,6 +506,8 @@ def cmd_import_watermarks(args: argparse.Namespace, session: Session) -> int:
                         m.last_day.isoformat() if m.last_day else "-",
                         m.last_ts.isoformat() if m.last_ts else "-",
                         m.updated_at.isoformat()[:19] if m.updated_at else "-",
+                        outcomes.get(m.dataset, {}).get("status", "-"),
+                        (outcomes.get(m.dataset, {}).get("error") or "-")[:48],
                     )
                     for m in marks
                 ],

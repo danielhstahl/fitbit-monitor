@@ -15,12 +15,14 @@ tested directly rather than through the CLI:
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
 import tempfile
 import unittest
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from fitbit_monitor.errors import StoreError
 from fitbit_monitor.ingest.pipeline import Ingest, IngestStats
 from fitbit_monitor.ingest.report import (
     EXIT_INTERRUPTED,
@@ -35,9 +37,10 @@ from fitbit_monitor.ingest.report import (
 )
 from fitbit_monitor.ingest.runlog import DatasetRun, RunLog
 from fitbit_monitor.store.watermarks import Watermarks
-from fitbit_monitor.store.writer import SeriesStore
+from fitbit_monitor.store.writer import SeriesStore, write_lock
 
 T0 = datetime(2026, 5, 1, tzinfo=UTC)
+REPO = Path(__file__).resolve().parents[1]
 
 
 class IngestTestCase(unittest.TestCase):
@@ -79,6 +82,39 @@ class RawRetentionTest(IngestTestCase):
         self.assertEqual(entry["source_id"], "/1/user/-/hrv/date/2026-05-01/7d.json")
 
 
+class WriteLockTest(unittest.TestCase):
+    def test_a_second_writer_is_refused_instead_of_stalling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.sqlite3"
+            SeriesStore(path).close()
+            with write_lock(path, what="an fm import"):
+                with self.assertRaises(StoreError) as caught:
+                    with write_lock(path, what="an fm import"):
+                        self.fail("the second writer should not have got in")
+                self.assertIn("already writing", str(caught.exception))
+                self.assertIn("--db", str(caught.exception.hint))
+            with write_lock(path):
+                pass  # released with the block, so the next import is fine
+
+    def test_the_lock_dies_with_the_process(self) -> None:
+        """A crashed import must not leave the store locked (which is why this is no
+        pid file and no cleanup step)."""
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.sqlite3"
+            SeriesStore(path).close()
+            script = (
+                "import sys; sys.path.insert(0, 'src');"
+                "from fitbit_monitor.store.writer import write_lock;"
+                "write_lock(sys.argv[1]).__enter__(); sys.exit(0)"
+            )
+            subprocess.run([sys.executable, "-c", script, str(path)], check=True, cwd=REPO)
+            with write_lock(path):
+                pass
+
+
 class RowUpsertTest(IngestTestCase):
     def test_rows_are_counted_as_insert_then_duplicate(self) -> None:
         rows = [(T0, {"rmssd": 40.0}), (T0 + timedelta(days=1), {"rmssd": 42.0})]
@@ -117,6 +153,64 @@ class RowUpsertTest(IngestTestCase):
         self.assertIn("timezone-aware", reasons)
         self.assertIn("not numeric", reasons)
         self.assertIn("no values", reasons)
+
+
+class OverlappingRangeTest(IngestTestCase):
+    """The idempotency property, stated the way the storage ticket asks for it:
+    importing a set of overlapping ranges must leave exactly what one clean import of
+    the whole span leaves - regardless of order, repetition or overlap."""
+
+    def _write(self, start_day: int, days: int) -> None:
+        base = date(2026, 4, 1)
+        rows = []
+        for offset in range(days):
+            index = start_day + offset
+            day = datetime.combine(base + timedelta(days=index), datetime.min.time(), tzinfo=UTC)
+            rows.append((day, {"rmssd": 40.0, "sdnn": 30.0 + index}))
+        self.ingest.rows("hrv", rows, source_id=f"chunk-{start_day}")
+
+    def test_random_overlapping_imports_equal_a_single_clean_import(self) -> None:
+        """Random *covering*: chunks are random in size and overlap each other, but
+        together they cover the span, so the only question left is whether the store
+        ends up exactly as if the span had been imported once."""
+        rng = random.Random(20260514)
+        span = 40
+        covered = 0
+        plan = []
+        while covered < span:
+            start = rng.randint(max(0, covered - 6), covered)
+            length = min(rng.randint(3, 12), span - start)
+            plan.append((start, length))
+            covered = max(covered, start + length)
+        self.assertGreater(len(plan), 3, "the plan should actually overlap itself")
+        for start, length in plan:
+            self._write(start, length)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            clean = SeriesStore(Path(tmp) / "clean.sqlite3")
+            Ingest(clean).rows("hrv", self._clean_rows())
+            clean.commit()
+            expected = {r["ts_utc"]: json.loads(r["payload"]) for r in clean.conn.execute("SELECT ts_utc, payload FROM series")}
+            clean.close()
+
+        actual = {r["ts_utc"]: json.loads(r["payload"]) for r in self.store.conn.execute("SELECT ts_utc, payload FROM series")}
+        self.assertEqual(set(actual), set(expected), "the same instants, no more and no fewer")
+        self.assertEqual(actual, expected, "and the same values a single import would have written")
+
+    def test_a_second_report_of_the_same_instants_counts_duplicates_not_rows(self) -> None:
+        self._write(0, 10)
+        again = self._write(5, 10)
+        self.assertIsNone(again)
+        stored = self.store.conn.execute("SELECT COUNT(*) AS n FROM series").fetchone()["n"]
+        self.assertEqual(stored, 15)
+
+    def _clean_rows(self):
+        base = date(2026, 4, 1)
+        out = []
+        for offset in range(40):
+            day = datetime.combine(base + timedelta(days=offset), datetime.min.time(), tzinfo=UTC)
+            out.append((day, {"rmssd": 40.0, "sdnn": 30.0 + offset}))
+        return out
 
 
 class ChunkTransactionTest(IngestTestCase):

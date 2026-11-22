@@ -118,6 +118,32 @@ class ImportCliTest(CliTestCase):
         _code, text = self.fm("import", "watermarks", expect=EXIT_OK)
         self.assertIn("LAST DAY", text)
         self.assertIn(UNTIL, text)
+        self.assertIn("LAST STATUS", text)
+        self.assertEqual(text.count(" ok "), 5, "every dataset's last outcome is on the same line")
+
+    def test_watermarks_show_the_last_status_and_error_per_dataset(self) -> None:
+        """A dataset that failed should still be findable after the fact, with its
+        reason - 'how far did it get' and 'how did it end' are one question."""
+        forbidden = Path(self.home / "forbidden")
+        forbidden.mkdir()
+        for path in sorted(FIXTURES.glob("*.json")):
+            payload = json.loads(path.read_text())
+            if "/hrv/" in str(payload.get("request", {}).get("path", "")):
+                payload["response"] = {
+                    "status": 403,
+                    "body": {"errors": [{"errorType": "insufficient_client_scope", "message": "no permission for hrv"}]},
+                    "headers": {"X-RateLimit-Remaining": "120", "X-RateLimit-Reset": "60"},
+                }
+            (forbidden / path.name).write_text(json.dumps(payload))
+        self.fm("import", "--fixtures", str(forbidden), "--since", SINCE, "--until", UNTIL, expect=EXIT_PARTIAL_FAILURE)
+
+        _code, text = self.fm("import", "watermarks", "--json", expect=EXIT_OK)
+        marks = {m["dataset"]: m for m in json.loads(text)["watermarks"]}
+        self.assertEqual(marks["sleep"]["status"], "ok")
+        self.assertNotIn("hrv", marks, "a dataset that stored nothing has no watermark - it is in the history")
+        _code, text = self.fm("import", "history", "--dataset", "hrv", expect=EXIT_OK)
+        self.assertIn("failed", text)
+        self.assertIn("HTTP 403", text, "the reason is on the same line as the failure")
 
     def test_a_big_pull_is_confirmed_or_said_to_be_unattended(self) -> None:
         config = self.home / "config" / "fitbit-monitor" / "config.toml"

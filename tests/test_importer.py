@@ -124,9 +124,49 @@ class PlannerTest(unittest.TestCase):
         self.assertTrue(any("no watermark" in note for note in heart.notes))
 
     def test_a_watermark_is_where_the_next_import_starts(self) -> None:
+        self.env.watermarks.advance("heart_rate", "api", last_day=date(2026, 5, 12), last_ts=None)
+        plan = self.planner.build(until=fx.UNTIL)
+        self.assertEqual(plan.dataset("heart_rate").since, date(2026, 5, 12), "the last fetched day is re-read once")
+
+    def test_the_overlap_never_reaches_before_the_requested_window(self) -> None:
         self.env.watermarks.advance("heart_rate", "api", last_day=date(2026, 5, 7), last_ts=None)
         plan = self.planner.build(until=fx.UNTIL)
-        self.assertEqual(plan.dataset("heart_rate").since, date(2026, 5, 8))
+        self.assertEqual(plan.dataset("heart_rate").since, date(2026, 5, 8), "the window floor wins over the overlap")
+
+    def test_resume_covers_the_whole_original_window_not_just_the_recent_default(self) -> None:
+        """A half-finished pull is continued from where it started, even if that is
+        months before the default window."""
+        self.env.watermarks.advance("daily_summary", "api", last_day=date(2026, 5, 2), last_ts=None)
+        plan = self.planner.build(until=fx.UNTIL, resume_from=date(2026, 5, 1))
+        summary = plan.dataset("daily_summary")
+        self.assertEqual(summary.since, date(2026, 5, 2), "one day of overlap, then everything onwards")
+        self.assertEqual(len(summary.chunks), 13)
+
+    def test_the_overlap_window_re_reads_recent_days_to_catch_late_corrections(self) -> None:
+        from fitbit_monitor.config import ImportSettings
+
+        env = fx.Environment(settings=ImportSettings(overlap_days=3))
+        self.addCleanup(env.cleanup)
+        env.watermarks.advance("hrv", "api", last_day=date(2026, 5, 10), last_ts=None)
+        plan = ImportPlanner(env.client, env.watermarks, env.settings).build(until=fx.UNTIL)
+        hrv = plan.dataset("hrv")
+        self.assertEqual(hrv.since, date(2026, 5, 8), "re-fetches the last three days")
+        self.assertTrue(any("late corrections" in note for note in hrv.notes))
+
+    def test_a_dataset_current_through_the_end_is_not_re_read_every_run(self) -> None:
+        """The overlap applies when there is something new; a current dataset is free."""
+        self.env.watermarks.advance("hrv", "api", last_day=date(2026, 5, 14), last_ts=None)
+        plan = self.planner.build(until=fx.UNTIL)
+        self.assertTrue(plan.dataset("hrv").skipped, "no requests spent re-reading a finished window")
+
+    def test_overlap_days_zero_restarts_exactly_after_the_watermark(self) -> None:
+        from fitbit_monitor.config import ImportSettings
+
+        env = fx.Environment(settings=ImportSettings(overlap_days=0))
+        self.addCleanup(env.cleanup)
+        env.watermarks.advance("hrv", "api", last_day=date(2026, 5, 10), last_ts=None)
+        plan = ImportPlanner(env.client, env.watermarks, env.settings).build(until=fx.UNTIL)
+        self.assertEqual(plan.dataset("hrv").since, date(2026, 5, 11))
 
     def test_a_dataset_already_fetched_through_the_end_is_skipped_not_refetched(self) -> None:
         self.env.watermarks.advance("heart_rate", "api", last_day=date(2026, 5, 14), last_ts=None)

@@ -6,9 +6,12 @@ history table write through here; plugins never see a :class:`SeriesStore`.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -20,6 +23,35 @@ from . import schema
 
 def _iso(value: datetime) -> str:
     return ensure_utc(value, field="ts").isoformat()
+
+
+@contextmanager
+def write_lock(path: Path | str, *, what: str = "another fm command"):
+    """One writer per store, enforced for the life of the block.
+
+    Two imports against the same database would interleave chunks and fight over the
+    same rate-limit budget, and SQLite's default busy handling turns that into either
+    a slow stall or a ``database is locked`` error. An advisory ``flock`` next to the
+    file is the cheap correct answer: it dies with the process, so a crashed import
+    never leaves the store locked, and it needs no lockfile cleanup or pid scraping.
+    """
+    lock_path = Path(path).with_name(Path(path).name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise StoreError(
+                f"{what} is already writing to {lock_path.name[:-5]}",
+                hint="wait for it to finish (it is safe to re-run afterwards), or point --db at a different store",
+            ) from exc
+        os.ftruncate(handle, 0)
+        os.write(handle, str(os.getpid()).encode())
+        yield lock_path
+    finally:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        os.close(handle)
 
 
 class SeriesStore:

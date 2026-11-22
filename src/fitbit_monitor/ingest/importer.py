@@ -299,6 +299,11 @@ class ImportPlanner:
         continues the year rather than quietly narrowing to the last week.
         """
         start_day, stop_day = day_window(since, until, default_days=self.settings.recent_days)
+        if resume_from is not None and resume_from < start_day:
+            # A resume covers the window the previous run was asked for, not the short
+            # default window: otherwise the days between that run's start and today's
+            # default window would be silently skipped.
+            start_day = resume_from
         names, notes = self._resolve_datasets(datasets)
         probed = 0 if self._profile is None else 1
         plan = ImportPlan(source=source, since=start_day, until=stop_day, probe_requests=probed, notes=notes)
@@ -357,11 +362,9 @@ class ImportPlanner:
         else:
             resume = self.watermarks.next_since(name)
             if resume is None:
-                if resume_from is not None and resume_from < start_day:
+                if resume_from is not None:
                     first = resume_from
-                    notes.append(
-                        f"no watermark - resuming the window of the previous run from {first.isoformat()}"
-                    )
+                    notes.append(f"no watermark - resuming the window of the previous run from {first.isoformat()}")
                 else:
                     first = min(stop_day - timedelta(days=max(1, self.settings.recent_days) - 1), start_day)
                     notes.append(
@@ -369,7 +372,17 @@ class ImportPlanner:
                         f"([import] recent_days = {self.settings.recent_days}); --full-history imports everything"
                     )
             else:
-                first = resume
+                # A default overlap: Fitbit recalculates sleep and HRV after a late
+                # sync, and re-reading a day or two costs a request, not duplicates.
+                # Only applied when there is still something new to fetch - a dataset
+                # that is current stays a no-op rather than a daily refetch.
+                overlap = max(0, int(getattr(self.settings, "overlap_days", 0)))
+                first = resume if resume > stop_day else max(start_day, resume - timedelta(days=overlap))
+                if first < resume:
+                    notes.append(
+                        f"re-fetching {(resume - first).days} already-imported day(s) "
+                        f"([import] overlap_days = {overlap}) to catch late corrections"
+                    )
         plan = DatasetPlan(dataset=name, since=first, until=stop_day, chunk_days=chunk_days, notes=tuple(notes))
         if first > stop_day:
             plan.skipped = True

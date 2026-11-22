@@ -51,6 +51,18 @@ exactly the ambiguous part. `--resume` re-plans the window of the previous run
 (recorded in `dataset_run`) rather than silently narrowing to the default recent
 window - a half-finished year-long backfill continues as a year.
 
+Two consequences of making the chunk the unit, both deliberate:
+
+* **A default overlap.** The next run re-reads `[import] overlap_days` (1) already-
+  imported days, because Fitbit recalculates sleep and HRV after a late sync and the
+  re-read costs a request instead of duplicates. It applies only when there is
+  something new to fetch - a dataset current through the end stays a no-op - and never
+  reaches before the requested window.
+* **One writer per store.** An advisory `flock` beside the database is held for the
+  duration of an import: two concurrent imports would interleave chunks and split one
+  rate-limit budget. `flock` dies with the process, so a crashed import leaves nothing
+  locked and there is no lock file to clean up.
+
 ### 3. Idempotency at three levels
 
 | level | mechanism | visible as |
@@ -101,8 +113,9 @@ then keep it current from the API" a two-command story instead of two codebases.
 Each run writes an `ImportReport` - one `DatasetReport` per dataset with range,
 chunks, rows, duplicates, quarantine, requests, bytes and watermark - to
 `<data-dir>/imports/<run-id>.json` (last `report_keep` kept) and to the `dataset_run`
-table (one row per dataset per run). `fm import report|history|watermarks` read
-them back; `--retry` and `--resume` are driven by the same rows.
+table (one row per dataset per run). `fm import report|history|watermarks` read them
+back - the history line carries the error text, and `watermarks` joins each dataset's
+last status in - and `--retry`/`--resume` are driven by the same rows.
 
 ### 7. No network in the tests
 
