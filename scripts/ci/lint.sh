@@ -9,7 +9,7 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-PYTHON="${PYTHON:-python3}"
+. scripts/_python.sh
 
 if [[ "${1:-}" != "--no-install" ]]; then
     "$PYTHON" -m pip install --quiet --upgrade pip
@@ -55,7 +55,7 @@ PYEOF
 
 echo
 echo "== shell scripts parse"
-for script in scripts/*/*.sh; do
+for script in scripts/*.sh scripts/*/*.sh; do
     bash -n "$script"
     echo "ok  $script"
 done

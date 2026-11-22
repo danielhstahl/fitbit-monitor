@@ -7,5 +7,6 @@
 #
 # Usage: ./scripts/dev/lint.sh
 set -euo pipefail
-. "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+. scripts/_python.sh
 exec ./scripts/ci/lint.sh --no-install

@@ -39,7 +39,7 @@ else
     .venv/bin/python -m pip install --quiet -e ".[dev]"
 fi
 
-. scripts/dev/_env.sh
+. scripts/_python.sh
 echo
 echo "environment: $("$PYTHON" -V) at $PYTHON"
 "$PYTHON" -c "import fitbit_monitor, sys; print('fitbit-monitor', fitbit_monitor.__version__, 'from', fitbit_monitor.__file__)"

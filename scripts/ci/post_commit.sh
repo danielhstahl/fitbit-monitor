@@ -16,7 +16,7 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-PYTHON="${PYTHON:-python3}"
+. scripts/_python.sh
 QUICK=0
 [[ "${1:-}" == "--quick" ]] && QUICK=1
 

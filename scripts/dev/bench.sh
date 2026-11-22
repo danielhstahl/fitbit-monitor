@@ -5,5 +5,6 @@
 #        ./scripts/dev/bench.sh --days 30            # faster, less representative
 #        ./scripts/dev/bench.sh --update-baseline    # re-record (then git add it)
 set -euo pipefail
-. "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+. scripts/_python.sh
 exec ./scripts/ci/benchmarks.sh --no-install "$@"

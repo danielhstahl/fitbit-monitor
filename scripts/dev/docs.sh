@@ -8,7 +8,8 @@
 # Usage: ./scripts/dev/docs.sh           # rewrite the block in place
 #        ./scripts/dev/docs.sh --check  # exit nonzero if the block is stale
 set -euo pipefail
-. "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+. scripts/_python.sh
 
 if [[ "${1:-}" == "--check" ]]; then
     exec "$PYTHON" scripts/docs/api_reference.py --check

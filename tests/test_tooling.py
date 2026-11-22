@@ -134,6 +134,15 @@ class DevEntrypointTest(unittest.TestCase):
             self.assertTrue(os.access(path, os.X_OK), f"scripts/dev/{name} is not executable")
             self.assertTrue(path.read_text().startswith("#!"), f"scripts/dev/{name} has no shebang")
 
+    def test_every_script_resolves_its_interpreter_in_one_place(self) -> None:
+        """No script may guess at `python3`; ADR-0001 §12 routes them all through one file."""
+        scripts = sorted((REPO / "scripts" / "ci").glob("*.sh")) + sorted(
+            (REPO / "scripts" / "dev").glob("*.sh")
+        )
+        self.assertGreaterEqual(len(scripts), 10)
+        for script in scripts:
+            self.assertIn("scripts/_python.sh", script.read_text(), f"{script} picks its own python")
+
     def test_readme_names_every_dev_entrypoint(self) -> None:
         readme = (REPO / "README.md").read_text()
         for name in DEV_ENTRYPOINTS:

@@ -429,12 +429,14 @@ command line.
 | `scripts/dev/docs.sh` | regenerate the generated API-reference block in `docs/plugins.md` | `scripts/docs/api_reference.py` |
 | `scripts/dev/record_fixtures.py` | (re)record the API fixtures; `--check` fails if they are stale | the importer tests replay `tests/fixtures/api` |
 
-Every wrapper resolves `$PYTHON` through `scripts/dev/_env.sh` (active virtualenv, else
-`.venv/bin/python`, else `python3`) and exports it, so `./scripts/dev/test.sh` works
-without activating anything and cannot run against a stranger interpreter. The
-`scripts/dev` set above is exactly what the README names, and
-`tests/test_tooling.py` fails if an entrypoint is added without being documented or
-documented without existing.
+Every script under `scripts/` - the gates included - resolves `$PYTHON` through
+`scripts/_python.sh`: an explicit `$PYTHON` (what CI sets), else an activated
+virtualenv, else this repository's `.venv`, else `python3`. That is what makes
+`./scripts/ci/coverage.sh --no-install` and `./scripts/dev/test.sh` the *same* command
+from a fresh clone, rather than a wall of `ModuleNotFoundError: fitbit_monitor`
+reported by whichever python3 happened to be first on `PATH`. The `scripts/dev` set
+above is exactly what the README names, and `tests/test_tooling.py` fails if an
+entrypoint is added without being documented or documented without existing.
 
 Both workflows stay thin: `ci.yml` runs `uv run --locked --extra dev --python <matrix>
 ./scripts/ci/{lint,coverage}.sh --no-install` over 3.11-3.14 and uploads
