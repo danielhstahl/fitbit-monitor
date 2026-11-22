@@ -96,6 +96,37 @@ class MetricResultTest(unittest.TestCase):
         self.assertEqual(metric(confidence=1.0).confidence, 1.0)
         self.assertIsNone(metric(confidence=None).confidence)
 
+    def test_value_must_be_a_finite_number(self) -> None:
+        """nan and inf are not measurements, and they are not valid JSON either."""
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(ValidationError, msg=str(bad)) as ctx:
+                metric(value=bad)
+            self.assertIn("finite", str(ctx.exception))
+        self.assertEqual(metric(value=1e308).value, 1e308)
+
+    def test_value_string_must_not_be_blank(self) -> None:
+        for bad in ("", "   "):
+            with self.assertRaises(ValidationError, msg=repr(bad)):
+                metric(value=bad)
+
+    def test_from_dict_names_the_missing_field(self) -> None:
+        raw = json.loads(metric().as_json())
+        del raw["key"]
+        with self.assertRaises(ValidationError) as ctx:
+            MetricResult.from_dict(raw)
+        self.assertIn("MetricResult.key", str(ctx.exception))
+
+    def test_from_dict_names_a_bad_timestamp(self) -> None:
+        raw = json.loads(metric().as_json())
+        raw["window_end"] = "last tuesday"
+        with self.assertRaises(ValidationError) as ctx:
+            MetricResult.from_dict(raw)
+        self.assertIn("window_end", str(ctx.exception))
+
+    def test_from_dict_refuses_a_payload_that_is_not_a_mapping(self) -> None:
+        with self.assertRaises(ValidationError):
+            MetricResult.from_dict(["not", "a", "mapping"])  # type: ignore[arg-type]
+
     def test_labels_and_details_are_immutable(self) -> None:
         m = metric(labels={"a": "b"}, details={"x": 1})
         with self.assertRaises(TypeError):
@@ -150,6 +181,48 @@ class AlertTest(unittest.TestCase):
             alert(evidence=[Evidence(at=late, value=1), Evidence(at=early, value=2)])
         self.assertIn("chronological", str(ctx.exception))
 
+    def test_evidence_error_names_the_pair_that_is_out_of_order(self) -> None:
+        """The message names the actual inversion, not the first two items."""
+        middle, late = T0 + timedelta(hours=1), T0 + timedelta(hours=2)
+        with self.assertRaises(ValidationError) as ctx:
+            alert(evidence=[Evidence(at=T0, value=1), Evidence(at=late, value=2), Evidence(at=middle, value=3)])
+        message = str(ctx.exception)
+        self.assertIn(late.isoformat(), message)
+        self.assertIn(middle.isoformat(), message)
+        self.assertNotIn(T0.isoformat(), message)
+
+    def test_title_must_be_one_line(self) -> None:
+        """Every sink prints the title inline, so a line break is a rendering bug."""
+        for bad in ("two\nlines", "two\r\nlines", "line one\nline two"):
+            with self.assertRaises(ValidationError, msg=repr(bad)) as ctx:
+                alert(title=bad)
+            self.assertIn("single line", str(ctx.exception))
+        self.assertEqual(alert(title="  padded  ").title, "padded")
+
+    def test_from_dict_names_the_missing_field(self) -> None:
+        raw = json.loads(alert().as_json())
+        del raw["message"]
+        with self.assertRaises(ValidationError) as ctx:
+            Alert.from_dict(raw)
+        self.assertIn("Alert.message", str(ctx.exception))
+
+    def test_from_dict_names_a_bad_field(self) -> None:
+        raw = json.loads(alert().as_json())
+        raw["occurred_at"] = "yesterday"
+        with self.assertRaises(ValidationError) as ctx:
+            Alert.from_dict(raw)
+        self.assertIn("Alert.occurred_at", str(ctx.exception))
+
+        raw = json.loads(alert().as_json())
+        raw["occurrences"] = "many"
+        with self.assertRaises(ValidationError) as ctx:
+            Alert.from_dict(raw)
+        self.assertIn("Alert.occurrences", str(ctx.exception))
+
+    def test_from_dict_refuses_a_payload_that_is_not_a_mapping(self) -> None:
+        with self.assertRaises(ValidationError):
+            Alert.from_dict("a line that never was json")  # type: ignore[arg-type]
+
     def test_evidence_accepts_pairs_and_mappings(self) -> None:
         a = alert(evidence=[(T0, 61.0), {"at": T0 + timedelta(minutes=5), "value": 63.0, "dataset": "heart_rate"}])
         self.assertEqual(len(a.evidence), 2)
@@ -158,6 +231,21 @@ class AlertTest(unittest.TestCase):
     def test_evidence_values_must_be_numbers(self) -> None:
         with self.assertRaises(ValidationError):
             Evidence(at=T0, value="high")  # type: ignore[arg-type]
+
+    def test_evidence_values_must_be_finite(self) -> None:
+        for bad in (float("nan"), float("inf")):
+            with self.assertRaises(ValidationError, msg=str(bad)):
+                Evidence(at=T0, value=bad)
+
+    def test_evidence_from_dict_names_the_missing_field(self) -> None:
+        with self.assertRaises(ValidationError) as ctx:
+            Evidence.from_dict({"at": T0.isoformat()})
+        self.assertIn("Evidence.value", str(ctx.exception))
+
+    def test_evidence_from_dict_names_a_bad_timestamp(self) -> None:
+        with self.assertRaises(ValidationError) as ctx:
+            Evidence.from_dict({"at": "05/01/2026", "value": 1.0})
+        self.assertIn("evidence.at", str(ctx.exception))
 
     def test_window_order_enforced(self) -> None:
         with self.assertRaises(ValidationError):

@@ -8,8 +8,10 @@ receives is read-only with a scoped config.
 from __future__ import annotations
 
 import logging
+import re
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from fitbit_monitor.config import PluginConfig
 from fitbit_monitor.errors import ConfigError
@@ -26,6 +28,42 @@ from fitbit_monitor.plugins.errors import PluginRegistrationError, PluginTimeout
 from fitbit_monitor.store.reader import ReadOnlyStore
 
 import support
+
+#: ADR-0004 §3 is the normative list of what a context may expose.
+ADR_0004 = Path(__file__).resolve().parents[1] / "docs" / "adr" / "0004-plugin-contract.md"
+
+
+def adr_context_members() -> set[str]:
+    """The ``PluginContext`` members the ADR tabulates, read from the ADR itself.
+
+    The table is the contract, so it is what the surface test compares against -
+    a member added to the code without a row in the ADR fails, and so does a row
+    that promises a member the code does not have.
+    """
+    lines = ADR_0004.read_text(encoding="utf-8").splitlines()
+    try:
+        header = next(i for i, line in enumerate(lines) if line.startswith("| member |"))
+    except StopIteration:  # pragma: no cover - the ADR lost its table
+        raise AssertionError("ADR-0004 §3 no longer tabulates the PluginContext members") from None
+    members: set[str] = set()
+    for line in lines[header + 2:]:
+        if not line.startswith("|"):
+            break
+        members.update(re.findall(r"`([a-z_][a-z0-9_]*)", line.split("|")[1]))
+    return members
+
+
+class WritingPlugin(MonitorPlugin):
+    """A plugin that does not take the read-only promise on faith."""
+
+    name = "writing_plugin"
+    summary = "attempts every write a connection can be asked for"
+    #: The statement this attempt tries; set by the test.
+    statement = ""
+
+    def run(self, ctx: PluginContext) -> None:
+        ctx.store.conn.execute(self.statement)
+        ctx.store.conn.commit()
 
 # --- the API version constant ------------------------------------------------
 class ApiVersionTest(unittest.TestCase):
@@ -220,6 +258,46 @@ class ContextTest(unittest.TestCase):
 
         with self.assertRaises(sqlite3.OperationalError):
             self.ctx.store.conn.execute("INSERT INTO series VALUES ('x','y','{}',NULL)")
+
+    def test_a_plugin_running_with_the_context_cannot_write(self) -> None:
+        """The read-only promise is SQLite's, not the plugin's good manners.
+
+        Every statement a plugin could reach for through ``ctx.store.conn`` is
+        refused, and the stored rows are still there afterwards.
+        """
+        import sqlite3
+
+        statements = (
+            "INSERT INTO series (dataset, ts_utc, payload) "
+            "VALUES ('daily_summary', '2026-05-01T00:00:00+00:00', '{}')",
+            "UPDATE series SET payload = '{}'",
+            "DELETE FROM series",
+            "CREATE TABLE _fm_plugin_wrote_here (x INTEGER)",
+            "DROP TABLE series",
+        )
+        for sql in statements:
+            with self.subTest(statement=sql.split()[0]):
+                plugin = WritingPlugin()
+                plugin.statement = sql
+                with self.assertRaises(sqlite3.OperationalError):
+                    plugin.run(self.ctx)
+        self.assertEqual(self.ctx.store.count("daily_summary"), 1)
+        self.ctx.store.assert_read_only()  # must not raise
+
+    def test_context_exposes_exactly_what_the_adr_tabulates(self) -> None:
+        documented = adr_context_members()
+        exposed = {name for name in dir(self.ctx) if not name.startswith("_")}
+        self.assertTrue(documented, "the ADR context table parsed empty")
+        self.assertEqual(
+            exposed - documented,
+            set(),
+            "PluginContext grew a public member that ADR-0004 §3 does not list",
+        )
+        self.assertEqual(
+            documented - exposed,
+            set(),
+            "ADR-0004 §3 promises context members the code does not expose",
+        )
 
     def test_metric_fills_plugin_window_and_timestamp(self) -> None:
         metric = self.ctx.metric("m", 1.5, unit="x")

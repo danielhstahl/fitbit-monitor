@@ -156,7 +156,7 @@ the fraction in `confidence` so a chart can show it.
 | field | notes |
 |---|---|
 | `key` | stable id, e.g. `resting_hr_weekly` |
-| `value` | number or string |
+| `value` | finite number or non-empty string; a `nan`/`inf` is refused at the call |
 | `unit` | `bpm`, `ms`, `min` - put it in, charts depend on it |
 | `confidence` | `0.0 .. 1.0` or omitted; completeness is an honest use of it |
 | `window_start` / `window_end` | default to the run window; aware UTC, end not before start |
@@ -166,7 +166,8 @@ the fraction in `confidence` so a chart can show it.
 `ctx.alert(key, title, message, *, occurred_at, severity, confidence, evidence, dedup_key, window_start, window_end, labels, details)`
 
 `severity` is `Severity.INFO` / `WARNING` / `CRITICAL` (strings are parsed,
-`warn` and `error` are accepted as aliases). `evidence` is a chronological
+`warn` and `error` are accepted as aliases). `title` is one line, because every sink
+prints it inline. `evidence` is a chronological
 sequence of `(timestamp, value)` pairs, `Evidence(...)` objects, or `{"at", "value"}`
 mappings - out-of-order evidence is rejected, because an alert that cannot say
 *when* in the right order is not evidence.

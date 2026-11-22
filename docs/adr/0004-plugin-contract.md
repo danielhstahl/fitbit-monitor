@@ -192,7 +192,9 @@ All four live in `fitbit_monitor.plugins.models`, are exported from
 a bad emit at the `ctx.metric(...)` call that caused it, with a message naming the
 field - not three layers later inside a sink. All three models round-trip (`as_dict()`,
 `as_json()`, `from_dict()`), which is what the JSONL history and the webhook depend
-on.
+on. Reading a payload back raises the same `ValidationError` naming the missing or
+malformed field - a truncated history line is `Alert.occurred_at is not an
+ISO-8601 timestamp`, never a bare `KeyError`.
 
 `Severity` - `str` enum, exactly three levels, `rank` 0 < 1 < 2, `at_least(other)`
 for "warn me at warning and above":
@@ -211,7 +213,7 @@ Every evidence timestamp is a tz-aware `datetime`, normalised to UTC:
 | field | type | required | rule enforced at construction |
 |---|---|---|---|
 | `at` | `datetime` | yes | naive or unparseable is rejected; stored as UTC |
-| `value` | `float` | yes | must be a real number; `bool` is rejected; `int` is widened |
+| `value` | `float` | yes | must be a real, finite number; `bool` is rejected; `int` is widened |
 | `dataset` | `str \| None` | no | which stored dataset it came from |
 | `detail` | `str \| None` | no | free-text qualifier, e.g. `"stage: deep"` |
 
@@ -221,7 +223,7 @@ Every evidence timestamp is a tz-aware `datetime`, normalised to UTC:
 |---|---|---|---|
 | `plugin` | `str` | yes (`ctx.metric` fills it) | non-empty |
 | `key` | `str` | yes | stable per metric, non-empty; the identity you chart against |
-| `value` | `float \| int \| str` | yes | a number or a string; `bool` is rejected |
+| `value` | `float \| int \| str` | yes | a number or a non-empty string; `bool` is rejected |
 | `window_start` | `datetime` | yes (defaults to `ctx.window.since`) | tz-aware, normalised to UTC |
 | `window_end` | `datetime` | yes (defaults to `ctx.window.until`) | tz-aware; must not precede `window_start` |
 | `unit` | `str \| None` | no | display unit, e.g. `"bpm"` |
@@ -237,7 +239,7 @@ Every evidence timestamp is a tz-aware `datetime`, normalised to UTC:
 |---|---|---|---|
 | `plugin` | `str` | yes (filled) | non-empty |
 | `key` | `str` | yes | non-empty; the kind of episode, e.g. `"high"` |
-| `title` | `str` | yes | non-empty, one line |
+| `title` | `str` | yes | non-empty, one line; a line break is rejected |
 | `message` | `str` | yes | non-empty; what the user reads |
 | `occurred_at` | `datetime` | yes | tz-aware, normalised to UTC - *when the data says it happened* |
 | `severity` | `Severity` | no, `Severity.WARNING` | parsed and normalised, see the table above |
@@ -253,7 +255,7 @@ Every evidence timestamp is a tz-aware `datetime`, normalised to UTC:
 | `last_seen_at` | `datetime \| None` | host-filled | latest sighting of this dedup key |
 | `occurrences` | `int` | host-filled, `1` | how many times the key has been seen |
 
-Two of these rules are load-bearing rather than tidy:
+Three of these rules are load-bearing rather than tidy:
 
 * **Every timestamp crossing the boundary is tz-aware and normalised to UTC.** A
   health series crossing a DST change is exactly where naive arithmetic produces a
@@ -261,6 +263,11 @@ Two of these rules are load-bearing rather than tidy:
 * **Evidence must already be chronological.** Sorting it silently would hide a plugin
   that built its timeline backwards; the contract suite re-checks the ordering of
   every emitted alert.
+* **No non-finite number crosses the boundary.** `nan` and `inf` are not measurements,
+  and `NaN` is not valid JSON, so a metric value or an evidence value that is not
+  finite is refused where it is emitted - before it can reach the webhook (§11) or
+  the JSONL history and come back as somebody else's parse error. `confidence` is
+  covered by its own `0.0 .. 1.0` bound.
 
 `Alert.dedup_key` SHOULD be set when several keys describe one episode (say `hr_high`
 and `hr_very_high`), because cooldown is applied per dedup key by the dispatcher
