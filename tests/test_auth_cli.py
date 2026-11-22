@@ -9,15 +9,20 @@ way it is used - by running it.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 import unittest
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from test_cli import CliTestCase
 
 from import_support import FIXTURES, write_credentials
-from fitbit_monitor.api.auth import CredentialStore
+from fitbit_monitor.api.auth import CredentialStore, TokenSet
 from fitbit_monitor.cli.common import EXIT_USAGE
+from fitbit_monitor.errors import UsageError
 from fitbit_monitor.ingest.report import EXIT_OK
 
 
@@ -57,6 +62,56 @@ class TokenEndpoint:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+
+
+class CredentialPermissionsTest(unittest.TestCase):
+    """The token file is the most sensitive thing this program writes."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "credentials.json"
+        self.store = CredentialStore(self.path)
+
+    def tokens(self) -> TokenSet:
+        return TokenSet(
+            access_token="secret-access",
+            refresh_token="secret-refresh",
+            expires_at=datetime.now(UTC) + timedelta(hours=8),
+            scopes=("activity",),
+            user_id="42",
+        )
+
+    def test_save_is_owner_only(self) -> None:
+        self.store.save(self.tokens())
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_a_world_readable_token_file_is_refused_with_a_fix_line(self) -> None:
+        self.store.save(self.tokens())
+        os.chmod(self.path, 0o644)
+        with self.assertRaises(UsageError) as caught:
+            self.store.load()
+        self.assertIn("readable by more than you", str(caught.exception))
+        self.assertIn("chmod 600", str(caught.exception.hint))
+        with self.assertRaises(UsageError):  # a loose mode is loud, not silently "not authenticated"
+            self.store.load_or_none()
+        os.chmod(self.path, 0o600)
+        self.assertEqual(self.store.load().access_token, "secret-access")
+
+    def test_nothing_about_the_tokens_reaches_the_logs(self) -> None:
+        import logging
+
+        self.store.save(self.tokens())
+        with self.assertLogs("fitbit_monitor", level="DEBUG") as captured:
+            logging.getLogger("fitbit_monitor.api.auth").debug("stored credentials for user 42")
+        self.assertNotIn("secret-access", "\n".join(captured.output))
+        self.assertNotIn("secret-refresh", "\n".join(captured.output))
+
+    def test_the_public_view_has_no_secrets(self) -> None:
+        public = json.dumps(self.tokens().public())
+        self.assertNotIn("secret-access", public)
+        self.assertNotIn("secret-refresh", public)
 
 
 class AuthCliTest(CliTestCase):
@@ -177,6 +232,19 @@ class ConfigCliTest(CliTestCase):
         payload = json.loads(text)
         self.assertEqual(payload["import"]["timezone"], "Europe/Berlin")
         self.assertIn("Europe/Berlin", self.fm("config", "show")[1])
+
+    def test_path_prints_every_resolved_location(self) -> None:
+        code, text = self.fm("config", "path", expect=EXIT_OK)
+        for key in ("config", "data_dir", "store", "credentials", "imports"):
+            self.assertIn(key, text)
+        self.assertIn(str(self.home), text)
+        _code, text = self.fm("config", "path", "--json", expect=EXIT_OK)
+        self.assertTrue(json.loads(text)["store"].endswith("store.sqlite3"))
+
+    def test_config_init_file_is_owner_only(self) -> None:
+        self.fm("config", "init", expect=EXIT_OK)
+        path = self.home / "config" / "fitbit-monitor" / "config.toml"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600, "it holds the client secret")
 
     def test_show_names_the_file_that_failed_to_parse(self) -> None:
         config = self.home / "config" / "fitbit-monitor" / "config.toml"

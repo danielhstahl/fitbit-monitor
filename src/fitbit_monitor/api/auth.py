@@ -22,6 +22,7 @@ import http.server
 import json
 import os
 import secrets
+import stat
 import threading
 import urllib.parse
 from dataclasses import dataclass, field
@@ -168,11 +169,33 @@ class CredentialStore:
     def load(self) -> TokenSet:
         if not self.path.exists():
             raise NotAuthenticatedError(f"no credentials at {self.path}")
+        self.reject_loose_permissions()
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (ValueError, OSError) as exc:
             raise NotAuthenticatedError(f"cannot read credentials at {self.path}: {exc}") from exc
         return TokenSet.from_dict(raw)
+
+    def loose_permissions(self) -> int | None:
+        """The group/other bits set on the token file, or None when it is private.
+
+        A refresh token readable by anyone on the machine is the whole account -
+        steps, sleep, heart rate and the identity Fitbit ties them to - so the mode is
+        checked rather than hoped for.
+        """
+        try:
+            mode = stat.S_IMODE(self.path.stat().st_mode)
+        except OSError:
+            return None
+        return mode if mode & 0o077 else None
+
+    def reject_loose_permissions(self) -> None:
+        mode = self.loose_permissions()
+        if mode is not None:
+            raise UsageError(
+                f"{self.path} is readable by more than you (mode {mode:03o})",
+                hint=f"run chmod 600 {self.path} - fm refuses to spend a token file others can read",
+            )
 
     def load_or_none(self) -> TokenSet | None:
         try:

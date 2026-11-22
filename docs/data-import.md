@@ -12,6 +12,11 @@ fm import                           # fetch it
 fm import report                    # what actually happened
 ```
 
+The token file is written `0600` and **refused at read time** if anything widened it
+(`chmod 600 <path>` is the fix offered): a refresh token readable by the machine is
+the whole account. `fm config path` prints every resolved location if a store or a
+token file is not where you expected.
+
 ## What "imported" means
 
 Five datasets, each with its own endpoint shape (see

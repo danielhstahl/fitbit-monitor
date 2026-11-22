@@ -469,8 +469,10 @@ class AuthFlowTest(unittest.TestCase):
             path = Path(tmp) / "credentials.json"
             store = CredentialStore(path)
             path.write_text('{"access_token": ""}')
+            path.chmod(0o600)  # a private file: content is what should be judged here
             self.assertIsNone(store.load_or_none())
             path.write_text("{broken")
+            path.chmod(0o600)
             self.assertIsNone(store.load_or_none())
 
     def test_public_view_has_no_secrets(self) -> None:

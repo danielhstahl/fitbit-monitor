@@ -2,6 +2,7 @@
 
     fm config init            write a commented config.toml to the config path
     fm config show            the resolved paths, API settings and import settings
+    fm config path            just the paths, one per line (shell-friendly)
 
 ``init`` exists because the first-run path has real friction: you have to register a
 Fitbit app, paste its client id, and the **redirect URI must match the registered one
@@ -18,6 +19,7 @@ import os
 from ..api.catalog import ALL_SCOPES
 from ..config import ApiSettings
 from ..errors import UsageError
+from pathlib import Path
 from .common import EXIT_OK, Session, print_json
 
 STARTER = """\
@@ -71,6 +73,10 @@ def register(sub: "argparse._SubParsersAction") -> None:
     show = csub.add_parser("show", help="resolved paths, API and import settings")
     show.add_argument("--json", action="store_true")
     show.set_defaults(func=cmd_config_show)
+
+    paths = csub.add_parser("path", help="print the resolved paths, one per line")
+    paths.add_argument("--json", action="store_true")
+    paths.set_defaults(func=cmd_config_path)
 
 
 def require_api_config(session: Session) -> ApiSettings:
@@ -153,6 +159,25 @@ def cmd_config_show(args: argparse.Namespace, session: Session) -> int:
     print(f"api:      client_id={api.client_id or '(not set)'} redirect_uri={api.redirect_uri}")
     print(f"import:   timezone={import_settings.timezone} recent_days={import_settings.recent_days} "
           f"chunk_days={dict(import_settings.chunk_days) or '-'}")
+    return EXIT_OK
+
+
+def cmd_config_path(args: argparse.Namespace, session: Session) -> int:
+    """The paths, plainly: the one flag you need when a store is not where you expected."""
+    resolved = {
+        "config": session.paths.config,
+        "data_dir": session.paths.data_dir,
+        "store": session.store_path,
+        "credentials": session.credentials().path,
+        "imports": session.paths.imports,
+        "etag_cache": session.paths.etag_cache,
+    }
+    if args.json:
+        print_json({key: str(value) for key, value in resolved.items()})
+        return EXIT_OK
+    for key, value in resolved.items():
+        state = "" if Path(value).exists() else "  (does not exist yet)"
+        print(f"{key}\t{value}{state}")
     return EXIT_OK
 
 
