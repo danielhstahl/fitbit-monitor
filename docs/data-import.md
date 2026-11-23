@@ -142,6 +142,57 @@ dataset per run (with its error), and each run also writes a JSON report to
 `fm import watermarks` joins in each dataset's last status, so "how far did it get"
 and "how did it end" are one table.
 
+## Asking the API instead of reading the logs
+
+The most common failure is a quiet zero: the run finished, and nothing arrived. The
+reason is almost always one of four things - a scope the token was never given, a
+dataset this account does not have, a rate limit, or an endpoint answering something
+unexpected - and all four are questions you can *ask* rather than infer:
+
+```console
+$ fm api probe
+account   Sam Example (user 42), member since 2022-11-08
+          resources: profile, settings, activities, body, weight, heartRate
+scopes    granted: activity, heartbeat, profile, sleep
+          wanted:  activity, heart_profile, heartbeat, profile, sleep, spo2
+          missing heart_profile - disables: hrv
+          missing spo2 - disables: spo2
+datasets  2022-11-08 .. 2026-11-23
+  [data]        daily_summary  activity        data 2022-11-08 .. 2026-11-23; sampled back to 2022-11-08 (memberSinceDate 2022-11-08), every sampled day had data
+  [data]        heart_rate     heartbeat       data 2022-11-08 .. 2026-11-23; sampled back to 2022-11-08 (memberSinceDate 2022-11-08), every sampled day had data
+  [no_scope]    hrv            heart_profile   token has no 'heart_profile' scope
+  [data]        sleep          sleep           data 2023-02-14 .. 2026-11-23; nothing as far back as 2023-01-17 (no_data)
+  [no_scope]    spo2           spo2            token has no 'spo2' scope
+rate limit 138 of 150 requests left in the 15m window; resets in 512s (at 2026-11-23T18:12:44+00:00)
+requests  41
+```
+
+Four answers, one call each, all of them about the account the stored token belongs to:
+
+* **scopes** - granted versus wanted, with every gap naming the datasets it disables and
+  whether `fm auth login` was even asked for it (a `[api] scopes` list shorter than the
+  catalog's is a silent way to disable a dataset at login time).
+* **datasets** - `data` (and its dates), `no_data` (404: nothing for those days),
+  `forbidden` (403), `unauthorized` (401), `rate_limited`, `server_error`, `unreachable`,
+  `empty` (200 with nothing readable in it) or `unknown`, with the API's own words in the
+  message. Nothing an endpoint answers with is turned into a crash, so one refused
+  dataset still leaves the others reported.
+* **history** - the earliest date of data per dataset, found by a doubling walk back from
+  today (1, 2, 4, 8 ... days, then the floor) rather than one request per day. The row
+  says how sure it is: `account_floor` (every sampled day back to the floor had data, so
+  the data reaches *at least* that far), `bounded` (an older sample came back empty, so
+  the data starts between that day and the earliest seen) or `budget` (the
+  `--max-requests` cap stopped the search). `--no-history` skips the walk entirely: one
+  request per dataset, and no claim about older data.
+* **rate limit** - the observed `X-RateLimit-*` headers, parsed and verbatim, with the
+  wall-clock time the window resets.
+
+It is read-only, bounded by `--max-requests` (default 60 - a probe is a diagnostic, not a
+backfill), and `--json` prints the same report as one object for a script or for
+`fm doctor --probe`. The exit code follows `fm import`: **0** every dataset the catalog
+knows answered with data, **5** some did not, **1** nothing did, **2** there was no token
+to ask with. `fm api probe --fixtures DIR` rehearses the whole thing offline.
+
 ## Backfilling from an export archive
 
 Years of history arrive faster from an archive than from any API, and the archive needs

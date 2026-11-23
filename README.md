@@ -40,6 +40,7 @@ fm auth login                       # one-time browser consent; token stays loca
 fm import --dry-run                 # what would this fetch, and at what cost
 fm import --since 2026-05-01 --until 2026-05-14    # pull two weeks
 fm import history                   # what the last runs landed
+fm api probe                        # why an import lands nothing: scopes, datasets, rate limit
 fm import --source csv --path ~/Downloads/export.zip   # backfill from the web export
 
 fm dev seed --days 90                 # deterministic synthetic sample data (not real data)
@@ -72,6 +73,7 @@ python -m pytest -q                  # the scaffolded contract suite, same one C
 |---|---|
 | `fm auth login [--scopes S] [--manual CODE] [--fixtures DIR]` | OAuth2 PKCE login in the browser; token stored `0600`, refreshed on use |
 | `fm auth status [--json]` / `fm auth logout` | what is granted, and getting rid of it |
+| `fm api probe [--dataset N] [--since D] [--until D] [--no-history] [--max-requests N] [--json]` | ask the API why an import lands nothing: granted vs wanted scopes, per-dataset data/403/404, rate-limit state, earliest date available |
 | `fm import [--since D] [--until D] [--dataset N] [--dry-run] [--json]` | pull a date range of every dataset the account allows |
 | `fm import --full-history` / `--resume` / `--retry` / `--max-requests N` | start at signup, finish an interrupted run, retry failures, bound a cron pull |
 | `fm import --source csv --path EXPORT [--file F] [--glob G]` | backfill from a Fitbit export or Google Takeout |
@@ -89,7 +91,7 @@ python -m pytest -q                  # the scaffolded contract suite, same one C
 | `fm plugins run [NAME ...] [--all] [--since D] [--until D] [--set NAME.KEY=VAL] [--json] [--timeout S] [--no-deliver]` | run plugins over a range and deliver their alerts |
 | `fm plugin new NAME [--dir DIR] [--force] [--dry-run]` | scaffold a plugin that already passes the contract tests |
 | `fm alerts list [--since D] [--severity S] [--plugin P] [--json]` | read the stored alert history |
-| `fm doctor [--quick] [--check NAME] [--json]` | one-pass install diagnosis: config, data dir, token, store, plugins, clock, last import; nonzero exit only on a hard failure |
+| `fm doctor [--quick] [--check NAME] [--probe] [--json]` | one-pass install diagnosis: config, data dir, token, store, plugins, clock, last import (and, with `--probe`, what the API allows); nonzero exit only on a hard failure |
 | `fm report [--since D] [--until D] [--json]` | **planned, not implemented** (exit 72): one document over a range; today: `fm import report`, `fm store stats`, `fm alerts list` |
 | `fm dev seed [--days N] [--end DATE] [--seed N] [--anomalies N] [--no-gaps] [--fresh]` | write deterministic synthetic sample data, with labelled abnormal episodes |
 | `fm dev info [--json]` | what is in the store right now |
@@ -164,17 +166,19 @@ check:
 [ok]      data_dir     path=/home/u/.local/share/fitbit-monitor exists=yes writable=yes
 [warn]    token        path=/home/u/.local/share/fitbit-monitor/credentials.json present=no expired=-
        hint: run `fm auth login` (an import needs a token)
+[skipped] api          probed=no requests=0
+       hint: `fm doctor --probe` (or `fm api probe`) asks the API what this account allows
 [warn]    store        path=/home/u/.local/share/fitbit-monitor/store.sqlite3 exists=no schema_version=-
        hint: `fm db init` creates an empty store; `fm dev seed --days 90` fills one with sample data
 [ok]      plugins      dirs="-" dirs_missing="-" count=2 usable=2
 [ok]      clock        utc=2026-11-23T18:04:11+00:00 local_offset=+00:00 future_rows=0
-doctor: 5 ok, 2 warn, 0 fail, 1 skipped - no hard failures
+doctor: 4 ok, 2 warn, 0 fail, 2 skipped - no hard failures
 ```
 
 Verdicts are `ok`, `warn`, `fail` and `skipped`, and **only a `fail` makes the exit code
 nonzero**: a machine that has never logged in is a warning, a store file that is not a
-store is a failure. The checks are `version`, `config`, `data_dir`, `token`, `store`,
-`plugins`, `clock` and `imports`; each line is `key=value` so it greps, and
+store is a failure. The checks are `version`, `config`, `data_dir`, `token`, `api`,
+`store`, `plugins`, `clock` and `imports`; each line is `key=value` so it greps, and
 `--json` is the same report for a script:
 
 ```bash
@@ -183,6 +187,14 @@ fm doctor --json | jq '.checks[] | select(.status != "ok")'
 
 `--quick` skips the two store scans (SQLite `integrity_check` and the
 future-timestamp count), and `--check NAME` runs one check.
+
+The `api` check is the only one that talks to the network, so it is `skipped` unless
+`--probe` asks for it - `fm doctor` has to stay free to run in a cron job or on a plane.
+With `--probe` it spends about one request per dataset and reports how many answered with
+data, which did not, which scopes are missing and how many requests are left. For the
+full diagnosis - earliest date of available data per dataset included - use
+`fm api probe`, which is the same questions with room to answer
+([docs/data-import.md](docs/data-import.md)).
 
 ## Plugins in one paragraph
 

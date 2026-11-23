@@ -50,6 +50,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .. import __version__
 from ..api.auth import CredentialStore
+from ..api.probe import run_probe
 from ..errors import FmError
 from ..plugins.contract import PLUGIN_API_VERSION
 from ..store import schema
@@ -61,6 +62,9 @@ Diagnose this install: config, data dir, credentials, store, plugins, clock, las
 One line per check, with a verdict: ok, warn, fail or skipped. The exit code is nonzero
 only when something FAILED - a fresh install with no token yet is a warning, not a
 failure. --json prints the same report as one JSON object.
+
+The `api` check is the one check that talks to the network, so it is skipped unless
+--probe asks for it; `fm api probe` is the same questions with more room to answer.
 """
 
 EPILOG = """\
@@ -69,8 +73,10 @@ examples:
   fm doctor --json | jq '.checks[] | select(.status!="ok")'
   grep -E '^\\[(fail|warn)\\]' <(fm doctor)   just the problems
   fm doctor --quick                         skip the store scans (integrity, future rows)
+  fm doctor --probe                         also ask the API what this account allows
 
-see also: fm config show, fm auth status, fm db status, fm store verify, fm plugins list
+see also: fm config show, fm auth status, fm api probe, fm db status, fm store verify,
+fm plugins list
 """
 
 # --- verdicts ---------------------------------------------------------------
@@ -125,8 +131,8 @@ def _quote(text: str) -> str:
     return '"' + text.replace('"', "'") + '"'
 
 
-def _short(error: BaseException) -> str:
-    """An exception as one line, capped: a SQLite message can be a paragraph."""
+def _short(error: BaseException | str) -> str:
+    """An exception (or an already-written reason) as one line, capped: SQLite can be a paragraph."""
     text = " ".join(str(error).split())
     return text[:160]
 
@@ -176,6 +182,8 @@ class Context:
     session: Session
     quick: bool = False
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
+    #: Whether the one network check (``api``) was asked for.
+    probe: bool = False
 
     @property
     def paths(self):
@@ -396,6 +404,58 @@ def check_store(ctx: Context) -> Check:
         connection.close()
 
 
+def check_api(ctx: Context) -> Check:
+    """What the API would let an import land: grants, datasets, rate limit.
+
+    The only check here that spends requests, so it is skipped by default - ``fm doctor``
+    must stay free to run on a plane and in a cron job. ``--probe`` opts in and runs the
+    cheap form of the probe (one request per dataset, no walk back through history);
+    ``fm api probe`` is the same questions asked in full.
+    """
+    if not ctx.probe:
+        return Check(
+            "api",
+            SKIPPED,
+            {"probed": False, "requests": 0},
+            hint="`fm doctor --probe` (or `fm api probe`) asks the API what this account allows",
+        )
+    try:
+        report = run_probe(
+            ctx.session.api_client(),
+            history=False,
+            clock=lambda: ctx.now,
+            timezone=ctx.session.config.import_.timezone,
+        )
+    except FmError as exc:
+        return Check(
+            "api",
+            WARN,
+            {"probed": False, "requests": 0, "error": _short(exc)},
+            hint="nothing could be asked: run `fm auth login`, then `fm api probe`",
+        )
+    detail: dict[str, Any] = {
+        "probed": True,
+        "requests": report.requests,
+        "usable": len(report.usable),
+        "datasets": len(report.datasets),
+        "missing_scopes": [gap.scope for gap in report.missing_scopes if gap.datasets],
+        "rate_limit_remaining": report.rate_limit.get("remaining"),
+        "blocked": [item.dataset for item in report.datasets if not item.usable],
+    }
+    if report.profile_error:
+        detail["profile_error"] = _short(report.profile_error)
+    if not report.usable:
+        return Check("api", WARN, detail, hint="nothing the catalog knows answered with data: `fm api probe`")
+    if report.blocked:
+        return Check(
+            "api",
+            WARN,
+            detail,
+            hint=f"{len(report.blocked)} dataset(s) will not import: `fm api probe` names the reason for each",
+        )
+    return Check("api", OK, detail)
+
+
 def check_plugins(ctx: Context) -> Check:
     """Where plugins come from, how many loaded, and which ones did not."""
     dirs = list(ctx.config.plugin_dirs)
@@ -550,6 +610,7 @@ CHECKS: tuple[Callable[[Context], Check], ...] = (
     check_config,
     check_data_dir,
     check_token,
+    check_api,
     check_store,
     check_plugins,
     check_clock,
@@ -557,9 +618,9 @@ CHECKS: tuple[Callable[[Context], Check], ...] = (
 )
 
 
-def run_checks(session: Session, *, quick: bool = False, now: datetime | None = None) -> list[Check]:
+def run_checks(session: Session, *, quick: bool = False, probe: bool = False, now: datetime | None = None) -> list[Check]:
     """Every check, in order. A check that raises becomes a ``fail`` naming itself."""
-    ctx = Context(session=session, quick=quick, now=now or datetime.now(UTC))
+    ctx = Context(session=session, quick=quick, probe=probe, now=now or datetime.now(UTC))
     checks: list[Check] = []
     for check in CHECKS:
         try:
@@ -620,6 +681,11 @@ def register(sub: "argparse._SubParsersAction") -> None:
         help="skip the store scans (integrity check, future-timestamp count)",
     )
     doctor.add_argument(
+        "--probe",
+        action="store_true",
+        help="ask the API what this account allows (costs requests; the api check is skipped without it)",
+    )
+    doctor.add_argument(
         "--check",
         dest="only",
         action="append",
@@ -636,7 +702,7 @@ def _check_names() -> list[str]:
 
 
 def cmd_doctor(args: argparse.Namespace, session: Session) -> int:
-    checks = run_checks(session, quick=bool(args.quick), now=datetime.now(UTC))
+    checks = run_checks(session, quick=bool(args.quick), probe=bool(args.probe), now=datetime.now(UTC))
     wanted = {str(name).strip() for name in getattr(args, "only", []) or []}
     if wanted:
         unknown = sorted(wanted - {name for name in _check_names()})

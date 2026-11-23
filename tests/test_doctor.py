@@ -455,5 +455,83 @@ class DoctorTestCase(unittest.TestCase):
         self.assertEqual({check["status"] for check in payload["checks"]} - {OK, WARN, FAIL, SKIPPED}, set())
 
 
+class ApiProbeCheckTest(DoctorTestCase):
+    """The `api` check: skipped unless ``--probe``, and answered from the fixtures when asked.
+
+    This is the one check in the report that spends requests, so the contract is that
+    (a) a plain ``fm doctor`` never reaches the network, (b) opting in reports the same
+    facts ``fm api probe`` does, and (c) an account that can read nothing warns rather
+    than fails.
+    """
+
+    FIXTURES = REPO / "tests" / "fixtures" / "api"
+    #: Inside the recorded window, so the fixtures answer for "today".
+    WHEN = datetime(2026, 5, 8, 12, tzinfo=UTC)
+    CATALOG_SCOPES = ("profile", "activity", "sleep", "heartbeat", "heart_profile", "spo2")
+
+    def setUp(self) -> None:
+        super().setUp()
+        original = os.environ.get("FM_FIXTURES")
+        os.environ["FM_FIXTURES"] = str(self.FIXTURES)
+        self.addCleanup(
+            lambda: os.environ.__setitem__("FM_FIXTURES", original)
+            if original is not None
+            else os.environ.pop("FM_FIXTURES", None)
+        )
+
+    def token_with(self, *scopes: str) -> None:
+        self.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        CredentialStore(self.credentials_path).save(
+            TokenSet(
+                access_token="probe-access-token",
+                refresh_token="probe-refresh-token",
+                expires_at=datetime.now(UTC) + timedelta(hours=8),
+                scopes=scopes,
+                user_id="42",
+            )
+        )
+
+    def api_check(self, *, probe: bool) -> Check:
+        return {check.name: check for check in run_checks(self.session(), probe=probe, now=self.WHEN)}["api"]
+
+    def test_it_is_skipped_by_default_so_a_plain_doctor_stays_offline(self) -> None:
+        payload = self.doctor_json()
+        api = next(check for check in payload["checks"] if check["check"] == "api")
+        self.assertEqual(api["status"], SKIPPED)
+        self.assertFalse(api["probed"])
+        self.assertEqual(api["requests"], 0)
+        self.assertIn("fm api probe", api["hint"])
+        self.assertEqual(payload["exit_code"], EXIT_OK)
+
+    def test_probing_a_catalog_that_answers_everything_is_ok(self) -> None:
+        self.token_with(*self.CATALOG_SCOPES)
+        check = self.api_check(probe=True)
+        self.assertEqual(check.status, OK, check.detail)
+        self.assertTrue(check.detail["probed"])
+        self.assertEqual(check.detail["usable"], check.detail["datasets"])
+        self.assertEqual(check.detail["blocked"], [])
+        self.assertIsNotNone(check.detail["rate_limit_remaining"])
+
+    def test_a_missing_scope_warns_and_names_the_scope(self) -> None:
+        self.token_with("profile", "activity", "sleep", "heartbeat")
+        check = self.api_check(probe=True)
+        self.assertEqual(check.status, WARN)
+        self.assertEqual(sorted(check.detail["missing_scopes"]), ["heart_profile", "spo2"])
+        self.assertIn("fm api probe", check.hint)
+        self.assertNotIn("fail", {check.status})
+
+    def test_nothing_answerable_warns_without_failing_the_report(self) -> None:
+        self.token_with("nothing_the_catalog_uses")
+        check = self.api_check(probe=True)
+        self.assertEqual(check.status, WARN)
+        self.assertEqual(check.detail["usable"], 0)
+        self.assertEqual(len(check.detail["blocked"]), check.detail["datasets"])
+
+    def test_no_token_is_a_warning_naming_the_fix(self) -> None:
+        _code, text, _err = self.cli("doctor", "--check", "api", "--probe", expect=EXIT_OK)
+        self.assertIn("[warn]", text)
+        self.assertIn("fm auth login", text)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

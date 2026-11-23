@@ -25,7 +25,7 @@ import argparse
 import sys
 from typing import Sequence
 
-from . import alerts_cmd, auth_cmd, config_cmd, db_cmd, dev_cmd, doctor_cmd, import_cmd
+from . import alerts_cmd, api_cmd, auth_cmd, config_cmd, db_cmd, dev_cmd, doctor_cmd, import_cmd
 from . import plugins_cmd, report_cmd, store_cmd
 from .common import (
     EXIT_ERROR,
@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=False)
     config_cmd.register(sub)
     auth_cmd.register(sub)
+    api_cmd.register(sub)
     db_cmd.register(sub)
     store_cmd.register(sub)
     import_cmd.register(sub)
@@ -66,6 +67,8 @@ examples:
   fm db status                                schema version and what is in the schema
   fm dev seed --days 90                       deterministic sample data (not real health data)
   fm auth login                               authorize fm against your account
+  fm api probe                                  why an import lands nothing: scopes, datasets,
+                                                rate limit, earliest data available
   fm import --dry-run                         what an import would cost, before spending it
   fm import --since 7d                        pull the last week (or: since the last import)
   fm import --source csv --path export.zip    backfill from the Fitbit web export
