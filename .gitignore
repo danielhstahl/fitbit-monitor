@@ -26,3 +26,6 @@ bench-summary.md
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+# act-mcp evidence (local only)
+.evidence/
+.act-mcp.lock
