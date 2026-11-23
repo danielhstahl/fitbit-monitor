@@ -19,6 +19,7 @@ seed_corpus          writing the corpus (the ingest path)                    row
 scan_intraday        the read API iterating every stored point               points/sec
 downsample_to_days   bucketing every intraday point by day                   points/sec
 hr_daily_features    the heart-rate feature library over the whole corpus    days/sec
+anomaly_detect       the anomaly engine over the whole corpus                 days/sec
 plugin_resting_trend the shipped plugin over the whole corpus                 ms  (lower)
 discover_plugins     registry discovery, validation and error isolation       ms  (lower)
 ==================== ======================================================= ==============
@@ -80,6 +81,7 @@ from fitbit_monitor.config import AppConfig  # noqa: E402
 from fitbit_monitor.hr import FeatureOptions, daily_features  # noqa: E402
 from fitbit_monitor.store.downsample import downsample  # noqa: E402
 from fitbit_monitor.store.reader import ReadOnlyStore  # noqa: E402
+from fitbit_monitor.anomaly import AnomalyConfig, detect  # noqa: E402
 from fitbit_monitor.store.seed import seed_store  # noqa: E402
 from fitbit_monitor.store.writer import SeriesStore  # noqa: E402
 from fitbit_monitor.timeutil import DateRange  # noqa: E402
@@ -213,6 +215,22 @@ def build_cases(store_path: Path, window: DateRange, days: int) -> list[Case]:
             raise RuntimeError("heart-rate features produced no usable day")
         return len(rows) / elapsed
 
+    def anomaly_detect() -> float:
+        """Everything the anomaly engine finds in the corpus, as days/second.
+
+        The detection plugin pays for one of these per run, and it is the only case here
+        doing real numerical work per window - contexts, baselines, scatter, evidence - so
+        this is the case that says the engine fits inside a monitoring cycle. The warm-up
+        read is included on purpose: the engine scans a wider range than it reports on, and
+        a benchmark that hid that would be measuring something no caller ever pays.
+        """
+        started = time.perf_counter()
+        result = detect(store, window.since, window.until, config=AnomalyConfig())
+        elapsed = time.perf_counter() - started
+        if result.days_scanned < days // 2:
+            raise RuntimeError(f"the engine scanned {result.days_scanned} of {days} days")
+        return result.days_scanned / elapsed
+
     def plugin_run() -> float:
         started = time.perf_counter()
         report = run_plugins(registry, store, window, config=config, names=["resting_trend"])
@@ -233,6 +251,12 @@ def build_cases(store_path: Path, window: DateRange, days: int) -> list[Case]:
         Case("scan_intraday", "read API over every stored point", "points/sec", scan),
         Case("downsample_to_days", "bucket every intraday point by day", "points/sec", to_days),
         Case("hr_daily_features", "heart-rate feature library over the corpus", "days/sec", hr_features),
+        Case(
+            "anomaly_detect",
+            "anomaly engine over the corpus (baselines, rules, evidence)",
+            "days/sec",
+            anomaly_detect,
+        ),
         Case(
             "plugin_resting_trend", "shipped plugin over the corpus", "ms", plugin_run,
             better="lower", sample_factor=5,

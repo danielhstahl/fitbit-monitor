@@ -1,14 +1,16 @@
 {
   "cases": {
-    "discover_plugins": 1.112,
-    "downsample_to_days": 417004.092,
-    "hr_daily_features": 206.461,
-    "plugin_resting_trend": 6.071,
-    "scan_intraday": 550967.921,
-    "seed_corpus": 127013.986
+    "anomaly_detect": 65.724,
+    "discover_plugins": 1.136,
+    "downsample_to_days": 416002.617,
+    "hr_daily_features": 204.306,
+    "plugin_resting_trend": 6.115,
+    "scan_intraday": 563610.223,
+    "seed_corpus": 126411.762
   },
   "days": 90,
   "direction": {
+    "anomaly_detect": "higher",
     "discover_plugins": "lower",
     "downsample_to_days": "higher",
     "hr_daily_features": "higher",
@@ -20,9 +22,9 @@
     "cpu_count": 8,
     "git": {
       "branch": "master",
-      "commit": "cafe068bd2d9eed987c52dc563c98b7bd3a28b98",
+      "commit": "37c9cf2f7a1605f30f39110b1d24da2a30800ce8",
       "dirty": true,
-      "short": "cafe068"
+      "short": "37c9cf2"
     },
     "hostname": "a10f4c2f2276",
     "implementation": "CPython",
@@ -34,53 +36,61 @@
     "release": "7.0.14-linuxkit",
     "system": "Linux"
   },
-  "recorded_utc": "2026-11-23T14:15:51+00:00",
+  "recorded_utc": "2026-11-23T15:58:34+00:00",
   "stats": {
+    "anomaly_detect": {
+      "best": 65.724,
+      "iterations": 9,
+      "mean": 64.626,
+      "stddev": 1.024,
+      "worst": 62.808
+    },
     "discover_plugins": {
-      "best": 1.112,
+      "best": 1.136,
       "iterations": 180,
-      "mean": 1.174,
-      "stddev": 0.112,
-      "worst": 2.129
+      "mean": 1.184,
+      "stddev": 0.07,
+      "worst": 1.898
     },
     "downsample_to_days": {
-      "best": 417004.092,
+      "best": 416002.617,
       "iterations": 9,
-      "mean": 409404.103,
-      "stddev": 15647.466,
-      "worst": 367861.557
+      "mean": 411229.389,
+      "stddev": 10319.719,
+      "worst": 383869.711
     },
     "hr_daily_features": {
-      "best": 206.461,
+      "best": 204.306,
       "iterations": 9,
-      "mean": 203.86,
-      "stddev": 1.765,
-      "worst": 201.325
+      "mean": 202.72,
+      "stddev": 1.736,
+      "worst": 198.938
     },
     "plugin_resting_trend": {
-      "best": 6.071,
+      "best": 6.115,
       "iterations": 45,
-      "mean": 6.402,
-      "stddev": 1.355,
-      "worst": 15.133
+      "mean": 6.309,
+      "stddev": 0.231,
+      "worst": 7.472
     },
     "scan_intraday": {
-      "best": 550967.921,
+      "best": 563610.223,
       "iterations": 9,
-      "mean": 545689.434,
-      "stddev": 8090.846,
-      "worst": 530348.188
+      "mean": 553410.438,
+      "stddev": 9457.793,
+      "worst": 533470.863
     },
     "seed_corpus": {
-      "best": 127013.986,
+      "best": 126411.762,
       "iterations": 9,
-      "mean": 123978.619,
-      "stddev": 2611.713,
-      "worst": 119551.519
+      "mean": 124434.135,
+      "stddev": 1274.009,
+      "worst": 122345.436
     }
   },
   "tolerance_percent": 15.0,
   "units": {
+    "anomaly_detect": "days/sec",
     "discover_plugins": "ms",
     "downsample_to_days": "points/sec",
     "hr_daily_features": "days/sec",

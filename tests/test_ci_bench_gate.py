@@ -120,6 +120,7 @@ class StatisticTest(unittest.TestCase):
             "scan_intraday": 1,
             "downsample_to_days": 1,
             "hr_daily_features": 1,
+            "anomaly_detect": 1,
             "plugin_resting_trend": 5,
             "discover_plugins": 20,
         }

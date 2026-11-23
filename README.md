@@ -124,6 +124,9 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
   built-in plugin explained.
 * [docs/storage.md](docs/storage.md) - the store: schema, migrations, the read API,
   the UTC convention, verify/backup/export, and retention.
+* [docs/detection.md](docs/detection.md) - the anomaly engine: personal baselines, the
+  sustained-rate and irregularity rules, what a confidence is made of, and what the
+  shipped thresholds were measured to cost on the labelled corpus.
 * [docs/data-import.md](docs/data-import.md) - auth, planning a pull, resuming an
   interrupted one, CSV backfill, and what each dataset means.
 * [docs/adr/0001-implementation-stack.md](docs/adr/0001-implementation-stack.md) - the
