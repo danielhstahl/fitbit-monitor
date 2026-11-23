@@ -710,15 +710,34 @@ def refusal_reason(result: dict[str, Any], text: str) -> str | None:
     ``status`` instead - that one is a real, red verdict.
     """
     if server_busy(result, text):
-        return "workspace_busy: another run already holds that workspace (act-mcp has no queue)"
-    for source in (result.get("structuredContent"), _json_from_text(text)):
-        if isinstance(source, dict) and isinstance(source.get("error"), dict):
-            error = source["error"]
-            code = str(error.get("code") or "error")
-            message = str(error.get("message") or "").strip()
-            return f"{code}: {message}" if message else code
-    match = re.search(r"^\S+:\s*(\w+):\s*argument", text, re.MULTILINE)
-    return f"invalid arguments ({match.group(1)})" if match else None
+        code, message = "workspace_busy", "another run already holds that workspace"
+    else:
+        code, message = "", ""
+        for source in (result.get("structuredContent"), _json_from_text(text)):
+            if isinstance(source, dict) and isinstance(source.get("error"), dict):
+                error = source["error"]
+                code = str(error.get("code") or "error")
+                message = str(error.get("message") or "").strip()
+                break
+        if not code:
+            match = re.search(r"^\S+:\s*(\w+):\s*argument", text, re.MULTILINE)
+            return f"invalid arguments ({match.group(1)})" if match else None
+    hint = REFUSAL_FIX.get(code)
+    reason = f"{code}: {message}" if message else code
+    return f"{reason}\n  fix: {hint}" if hint else reason
+
+
+# The three refusals this repository actually hits, and what to do about each. Every one of
+# them ends the same way - the gate runs its scripts instead - but only the first is
+# something a person can go and fix, so it says so.
+REFUSAL_FIX = {
+    "isolation_failed": "the server's own checkout cannot run this commit: commit or stash what is "
+    "dirty in the tree the server named, or let the gates run directly",
+    "workspace_busy": "act-mcp runs one job per workspace with no queue: wait for the run in "
+    "flight, or let the gates run directly",
+    "invalid_arguments": "this client's derived argument set does not match this server; see the "
+    "call line above, or let the gates run directly",
+}
 
 
 def job_failed(result: dict[str, Any], text: str) -> bool:

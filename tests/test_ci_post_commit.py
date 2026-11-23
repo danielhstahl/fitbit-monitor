@@ -882,7 +882,7 @@ class WorkspaceBoundServerTest(unittest.TestCase):
         self.assertIn("status: failed", result.stderr)
 
     def test_a_refusal_about_the_runner_is_not_reported_as_a_verdict(self) -> None:
-        for code in ("invalid_arguments", "workspace_busy"):
+        for code in ("invalid_arguments", "workspace_busy", "isolation_failed"):
             with self.subTest(code=code), self.server(
                 tool_results={"run_workflow": tool_error(code, "this runner cannot do that right now")}
             ) as server:
@@ -899,7 +899,32 @@ class WorkspaceBoundServerTest(unittest.TestCase):
                 )
             self.assertEqual(result.returncode, 2, f"{code} must fall back, not fail the gate")
             self.assertIn(code, result.stderr)
+            self.assertIn("fix:", result.stderr)
             self.assertNotIn("reported a failing job", result.stderr)
+
+    def test_a_dirty_server_worktree_says_who_has_to_clean_up(self) -> None:
+        # What the live act-mcp here answers: its HEAD is this commit but its own worktree
+        # is dirty, so it will not run - and the fix belongs to the server's tree.
+        with self.server(
+            tool_results={
+                "run_workflow": tool_error(
+                    "isolation_failed", "this workspace cannot run 0123456789abcdef0123456789abcdef01234567"
+                )
+            }
+        ) as server:
+            result = act_client(
+                "--url",
+                server.url,
+                "run",
+                "--workspace",
+                str(self.tmp),
+                "--workflow",
+                "ci.yml",
+                "--job",
+                "coverage",
+            )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("the server's own checkout cannot run this commit", result.stderr)
 
     def test_a_required_argument_this_client_cannot_derive_stops_before_the_call(self) -> None:
         tool = {
