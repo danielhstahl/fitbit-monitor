@@ -706,7 +706,11 @@ and a run that raised none says which of four things happened:
 | `hr_anomaly_findings` | what crossed a rule, and `alerted: true/false` for what the plugin did about each |
 | `hr_anomaly_suppressed` | what did not become an alert, `by_code`, with the reason and who decided (`engine` or `hr-anomaly`) |
 
-`--json` carries all of it, including the rules that never ran:
+`--json` carries all of it, including the rules that never ran. With `--json` the console
+sink's human-readable block goes to **stderr**, not stdout: stdout is exactly one JSON
+document even when there is nothing on it but the report, so `| jq` and `| python -m
+json.tool` work on a run that alerted. Drop `--json` and the alert text comes back to
+stdout, where the sink normally prints it:
 
 ```console
 $ fm plugins run --name hr-anomaly --since 20d --json | python -m json.tool

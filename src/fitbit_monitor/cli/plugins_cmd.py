@@ -20,7 +20,7 @@ from ..plugins.errors import PluginError
 from ..plugins.registry import PluginRecord
 from ..plugins.runner import run_plugins
 from ..plugins.scaffold import scaffold_plugin
-from ..plugins.sinks import build_dispatcher
+from ..plugins.sinks import Printer, build_dispatcher
 from ..timeutil import DateRange
 from .common import EXIT_ERROR, EXIT_OK, EXIT_USAGE, Session, print_json, render_table
 
@@ -288,13 +288,20 @@ def cmd_plugins_run(args: argparse.Namespace, session: Session) -> int:
             from dataclasses import replace as _replace
 
             webhook = _replace(webhook, allow_insecure=True, enabled=True)
+        # With --json, stdout is exactly one JSON document: a console sink that printed
+        # ahead of it would break `fm plugins run --json | jq` for every user who has
+        # something to alert on, which is the opposite of the point. The human block goes
+        # to stderr there, where every other human line of a machine-readable run goes.
+        console_printer: Printer = (
+            (lambda text: print(text, file=sys.stderr)) if args.json else (lambda text: print(text))
+        )
         dispatcher = build_dispatcher(
             session.config,
             store_path=session.store_path,
             data_dir=session.paths.data_dir,
             jsonl=False if args.no_alerts_file else None,
             webhook=webhook,
-            printer=lambda text: print(text),
+            printer=console_printer,
         )
     try:
         report = run_plugins(
