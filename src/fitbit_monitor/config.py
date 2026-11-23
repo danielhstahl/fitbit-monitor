@@ -47,6 +47,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
+from . import logsecrets
 from .errors import ConfigError
 from .paths import Paths
 
@@ -230,6 +231,15 @@ class ApiSettings:
     timeout: float = 30.0
     retries: int = 3
     credentials_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        """Register the client secret as a secret, the moment it is read.
+
+        Config files are loaded on every command, so this is what makes "the client
+        secret never appears in a log line" true without a single call site having to
+        remember to be careful - see :mod:`fitbit_monitor.logsecrets`.
+        """
+        logsecrets.remember(self.client_secret)
 
     @property
     def redirect_uri(self) -> str:

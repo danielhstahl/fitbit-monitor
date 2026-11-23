@@ -752,8 +752,12 @@ class CommandSurfaceTest(CliTestCase):
 
     #: the names the scaffold ticket promises a user will find in `fm --help`
     REQUIRED = ["auth", "import", "store", "plugins", "report", "db", "doctor", "config"]
-    #: the two that are declared but not built yet
-    STUBS = ["report", "doctor"]
+    #: the one command that is declared but not built yet (`fm doctor` was built in
+    #: fitb-mtf.10; a new stub belongs here until it works)
+    STUBS = ["report"]
+    #: top-level names that are commands in their own right, not just groups, so a bare
+    #: invocation of them runs the command instead of printing usage
+    LEAVES = ["import", "doctor"]
 
     def _top_level(self) -> dict:
         return build_parser()._subparsers._group_actions[0].choices
@@ -799,8 +803,8 @@ class CommandSurfaceTest(CliTestCase):
     def test_a_bare_group_never_tracebacks(self) -> None:
         """`fm store` with no leaf command is a usage error with usage text, not a stack."""
         for name in self._top_level():
-            if name in self.STUBS or name == "import":
-                continue  # `fm import` is itself a command, not just a group
+            if name in self.STUBS or name in self.LEAVES:
+                continue  # stubs print their own verdict; leaves are commands, not groups
             with self.subTest(command=name):
                 code, text = self.fm(name)
                 self.assertEqual(code, EXIT_USAGE)

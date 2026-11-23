@@ -32,6 +32,7 @@ from ..config import ApiSettings, ImportSettings
 from ..timeutil import utcnow
 from .auth import CredentialStore, TokenSet, refresh
 from .errors import (
+    CredentialsExpiredError,
     HTTPError,
     NotAuthenticatedError,
     RateLimitError,
@@ -145,20 +146,37 @@ class FitbitClient:
         self._tokens = tokens
 
     def ensure_fresh(self, *, force: bool = False) -> TokenSet:
-        """Refresh the access token if it is expired or nearly so."""
+        """Refresh the access token if it is expired or nearly so.
+
+        The refresh is logged - name and outcome only, never a token - because a refresh
+        that fails quietly is the failure mode an import cannot recover from on its own,
+        and the log is the only place a user will look. See
+        :mod:`fitbit_monitor.logsecrets` for why a log line here cannot leak a credential.
+        """
         tokens = self.tokens
         if not force and not tokens.needs_refresh(self.clock()):
+            log.debug("access token still valid (expires %s)", tokens.expires_at.isoformat(timespec="seconds"))
             return tokens
-        refreshed = refresh(
-            self.transport,
-            token_url=self.api.token_url,
-            client_id=self.api.client_id,
-            client_secret=self.api.client_secret,
-            refresh_token=tokens.refresh_token,
-            now=self.clock(),
-        )
+        log.debug("refreshing the access token (%s)", "API said 401" if force else "expired or nearly so")
+        try:
+            refreshed = refresh(
+                self.transport,
+                token_url=self.api.token_url,
+                client_id=self.api.client_id,
+                client_secret=self.api.client_secret,
+                refresh_token=tokens.refresh_token,
+                now=self.clock(),
+            )
+        except CredentialsExpiredError as exc:
+            log.error("token refresh refused: %s", exc)
+            raise
         self.credentials.save(refreshed)
         self._tokens = refreshed
+        log.info(
+            "access token refreshed (scopes: %s); valid until %s",
+            ", ".join(refreshed.scopes) or "none reported",
+            refreshed.expires_at.isoformat(timespec="seconds"),
+        )
         return refreshed
 
     def post_form(self, url: str, fields: Mapping[str, str], *, headers: Mapping[str, str] | None = None) -> Response:

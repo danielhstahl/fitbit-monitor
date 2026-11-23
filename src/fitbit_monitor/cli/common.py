@@ -26,7 +26,7 @@ from ..plugins.registry import PluginRegistry
 from ..store.reader import ReadOnlyStore
 from ..store.writer import SeriesStore
 from ..timeutil import DateRange, parse_date_arg
-from .. import logsafe
+from .. import logfmt
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -187,6 +187,21 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--db", help="store database path (default: <data-dir>/store.sqlite3)")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="show plugin log records and tracebacks")
     parser.add_argument("-q", "--quiet", action="store_true", help="only print errors and results")
+    parser.add_argument(
+        "--log-level",
+        dest="log_level",
+        metavar="LEVEL",
+        default=None,
+        help=f"log level override: {', '.join(sorted(logfmt.LEVELS))} (default: $FM_LOG_LEVEL or warning)",
+    )
+    parser.add_argument(
+        "--log-format",
+        dest="log_format",
+        metavar="FMT",
+        choices=logfmt.FORMATS,
+        default=None,
+        help="log line format (default: $FM_LOG_FORMAT or text)",
+    )
 
 
 def session_from_args(args: argparse.Namespace) -> Session:
@@ -203,16 +218,28 @@ def session_from_args(args: argparse.Namespace) -> Session:
     return Session(paths=paths, config=config, verbose=getattr(args, "verbose", 0))
 
 
-def configure_logging(verbose: int, quiet: bool) -> None:
-    """Set up the root handler, with health-value redaction on it.
+def configure_logging(
+    verbose: int = 0,
+    quiet: bool = False,
+    *,
+    level: str | None = None,
+    format: str | None = None,
+    stream: Any = None,
+) -> logging.Handler:
+    """Set up the root handler: level, format, and both redaction filters on it.
 
-    Every log line fm writes passes a :class:`~fitbit_monitor.logsafe.RedactingFilter`,
-    so a debug line that quotes a reading ends up as ``resting_hr=<redacted>``. Datasets,
-    counts, dates and durations are left alone - see ``docs/data-policy.md``.
+    Thin delegation to :func:`fitbit_monitor.logfmt.configure`, kept as the CLI's own
+    entry point so ``main`` says only "configure logging from these flags".
+
+    Every log line fm writes passes two filters: the health-value
+    :class:`~fitbit_monitor.logsafe.RedactingFilter` (a debug line that quotes a reading
+    ends up as ``resting_hr=<redacted>`` - see ``docs/data-policy.md``) and the
+    credential :class:`~fitbit_monitor.logsecrets.SecretRedactingFilter`, which turns an
+    OAuth token or a client secret into ``[REDACTED]`` in text and JSON alike. Datasets,
+    counts, dates and durations are left alone - a log line you cannot read is a log
+    line that will get turned off.
     """
-    level = logging.DEBUG if verbose > 1 else logging.INFO if verbose else logging.ERROR if quiet else logging.WARNING
-    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
-    logsafe.install()
+    return logfmt.configure(verbose=verbose, quiet=quiet, level=level, format=format, stream=stream)
 
 
 __all__ = [

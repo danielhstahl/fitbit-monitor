@@ -17,10 +17,10 @@ anywhere except the alert webhook you configure - see
 > account - and that corpus is synthetic data about nobody, never real health data and
 > never sent anywhere.
 >
-> Two commands - `fm report` and `fm doctor` - are declared in the parser and in the
-> table below but do not compute anything yet: they print what will replace the
-> commands they are meant to fold together and exit **72** (not implemented), so a
-> script can tell "not built" from "failed".
+> One command - `fm report` - is declared in the parser and in the table below but does
+> not compute anything yet: it prints what will replace the commands it is meant to fold
+> together and exits **72** (not implemented), so a script can tell "not built" from
+> "failed". `fm doctor` used to be in that group; it now runs the whole diagnosis.
 >
 > Data source: the **Google Health API** (`https://health.googleapis.com/v4`), decided
 > and dated in [ADR-0002](docs/adr/0002-health-api-source.md), with a Google Takeout
@@ -53,6 +53,7 @@ fm plugins run resting_trend --since 8w --json
 fm plugins run --name hr-anomaly --since 90d    # alert on what is unusual for you
 fm alerts list --since 7d             # what has been flagged
 fm plugins --api                      # the plugin API version this build serves
+fm doctor                             # what is wrong with this install (read-only)
 ```
 
 Write a plugin:
@@ -88,8 +89,8 @@ python -m pytest -q                  # the scaffolded contract suite, same one C
 | `fm plugins run [NAME ...] [--all] [--since D] [--until D] [--set NAME.KEY=VAL] [--json] [--timeout S] [--no-deliver]` | run plugins over a range and deliver their alerts |
 | `fm plugin new NAME [--dir DIR] [--force] [--dry-run]` | scaffold a plugin that already passes the contract tests |
 | `fm alerts list [--since D] [--severity S] [--plugin P] [--json]` | read the stored alert history |
+| `fm doctor [--quick] [--check NAME] [--json]` | one-pass install diagnosis: config, data dir, token, store, plugins, clock, last import; nonzero exit only on a hard failure |
 | `fm report [--since D] [--until D] [--json]` | **planned, not implemented** (exit 72): one document over a range; today: `fm import report`, `fm store stats`, `fm alerts list` |
-| `fm doctor [--quick] [--json]` | **planned, not implemented** (exit 72): one-pass install diagnosis; today: `fm config show`, `fm auth status`, `fm db status`, `fm store verify`, `fm plugins validate` |
 | `fm dev seed [--days N] [--end DATE] [--seed N] [--anomalies N] [--no-gaps] [--fresh]` | write deterministic synthetic sample data, with labelled abnormal episodes |
 | `fm dev info [--json]` | what is in the store right now |
 
@@ -101,7 +102,7 @@ Exit codes, the same for every command:
 | 1 | a plugin errored, misconfigured itself, or timed out; or an import landed nothing |
 | 2 | bad arguments or unreadable config |
 | 4 | no local store to read - create one with `fm dev seed` |
-| 72 | the command exists in this build but is not implemented (`fm report`, `fm doctor`) |
+| 72 | the command exists in this build but is not implemented (`fm report`) |
 
 `fm import` adds three of its own, because "it ran" is not a useful answer for a
 job that costs thousands of rate-limited requests: **3** partial (some datasets
@@ -111,6 +112,77 @@ interrupted with the completed chunks stored. See
 
 `fm plugins run` is deliberately not a daemon: there is no `--watch` or
 `--interval`. Run it from cron or a timer and get the same dedup and cooldown.
+
+## Reading the log, and `fm doctor`
+
+`fm` is a cron job as often as it is a terminal command, so when an import lands nothing
+or an alert never arrives, the log is the record. How loud it is comes from the flags or
+the environment:
+
+| what you say | level |
+|---|---|
+| (nothing) | `warning` |
+| `-v` | `info` |
+| `-vv` | `debug` |
+| `-q` | `error` |
+| `--log-level NAME`, or `FM_LOG_LEVEL` | any of `debug`, `info`, `warning`, `error`, `critical` |
+
+A flag beats the environment, and `-q` beats `-v`. A text line carries a UTC timestamp
+and the logger (module) name, which is what makes a plugin's own lines attributable:
+
+```text
+2026-11-23T18:04:11Z INFO    fitbit_monitor.api.client: access token refreshed; valid until 2026-11-24T02:04:11
+2026-11-23T18:04:12Z WARNING fitbit_monitor.ingest.importer: skipping 2 dataset(s) with no granted scope: spo2, body
+```
+
+`--log-format json` (or `FM_LOG_FORMAT=json`) writes one JSON object per line - `ts`,
+`level`, `logger`, `module`, `message`, plus any `extra` the emitter attached and a
+redacted `exception` - for `jq` and for a log shipper:
+
+```bash
+fm --log-format json -v import --since 7d | jq -r 'select(.level=="warning") | .message'
+```
+
+**Two kinds of thing never appear in a log line, in either format**: health readings and
+credentials. Both are stripped by filters on the handler, not by each call site -
+`fitbit_monitor.logsafe` rewrites a reading to `resting_hr=<redacted>` and
+`fitbit_monitor.logsecrets` rewrites a credential to `[REDACTED]`. Secrets are masked
+two ways: by **shape** (`access_token=…`, `"client_secret": "…"`, `{'Authorization':
+'Bearer …'}`, `?access_token=…` in a URL) and by **identity** - a `TokenSet` registers
+its own access and refresh tokens, and the client secret from `config.toml` registers
+itself, the moment they are read, so anything read from the token store is masked
+however it happens to be formatted. Tracebacks go through the same filter. The tests are
+`tests/test_log_redaction.py` (and `tests/test_data_policy.py` for readings); the policy
+is [docs/data-policy.md](docs/data-policy.md).
+
+When something looks off, run `fm doctor` first. It is read-only (it writes one probe
+file into the data dir to test writability, then deletes it) and prints a verdict per
+check:
+
+```text
+[ok]      config       path=/home/u/.config/fitbit-monitor/config.toml exists=yes parsed=yes
+[ok]      data_dir     path=/home/u/.local/share/fitbit-monitor exists=yes writable=yes
+[warn]    token        path=/home/u/.local/share/fitbit-monitor/credentials.json present=no expired=-
+       hint: run `fm auth login` (an import needs a token)
+[warn]    store        path=/home/u/.local/share/fitbit-monitor/store.sqlite3 exists=no schema_version=-
+       hint: `fm db init` creates an empty store; `fm dev seed --days 90` fills one with sample data
+[ok]      plugins      dirs="-" dirs_missing="-" count=2 usable=2
+[ok]      clock        utc=2026-11-23T18:04:11+00:00 local_offset=+00:00 future_rows=0
+doctor: 5 ok, 2 warn, 0 fail, 1 skipped - no hard failures
+```
+
+Verdicts are `ok`, `warn`, `fail` and `skipped`, and **only a `fail` makes the exit code
+nonzero**: a machine that has never logged in is a warning, a store file that is not a
+store is a failure. The checks are `version`, `config`, `data_dir`, `token`, `store`,
+`plugins`, `clock` and `imports`; each line is `key=value` so it greps, and
+`--json` is the same report for a script:
+
+```bash
+fm doctor --json | jq '.checks[] | select(.status != "ok")'
+```
+
+`--quick` skips the two store scans (SQLite `integrity_check` and the
+future-timestamp count), and `--check NAME` runs one check.
 
 ## Plugins in one paragraph
 
@@ -262,7 +334,9 @@ src/fitbit_monitor/
     builtin/   resting_trend.py - the reference metric plugin
                hr_anomaly.py       - the reference alert plugin, over anomaly/
   cli/         common.py auth_cmd.py config_cmd.py db_cmd.py store_cmd.py import_cmd.py plugins_cmd.py alerts_cmd.py report_cmd.py doctor_cmd.py dev_cmd.py
+  logsecrets.py credential redaction - by shape and by value - for every log record
   logsafe.py   health-value redaction for everything that reaches a log handler
+  logfmt.py    log levels (flags + FM_LOG_LEVEL), the text and JSON formatters, handler setup
 docs/          storage.md, plugins.md, data-import.md, data-policy.md, ci.md, adr/
 scripts/       _python.sh - the one interpreter resolver; no script guesses at python3
                dev/{bootstrap,lint,typecheck,test,coverage,bench,check,docs}.sh + record_fixtures.py - what you type;

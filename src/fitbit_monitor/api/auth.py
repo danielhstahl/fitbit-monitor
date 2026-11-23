@@ -30,6 +30,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .. import logsecrets
 from ..errors import UsageError
 from ..timeutil import ensure_utc, utcnow
 from .errors import CredentialsExpiredError, NotAuthenticatedError
@@ -90,7 +91,13 @@ class PkceFlow:
 
 @dataclass(frozen=True)
 class TokenSet:
-    """An access token, its refresh token, and what they let this program do."""
+    """An access token, its refresh token, and what they let this program do.
+
+    Both tokens register themselves with :mod:`~fitbit_monitor.logsecrets` the moment a
+    ``TokenSet`` exists, because that is earlier than any log line that could name them:
+    a token read from the credential file, returned by the token endpoint, or handed in
+    by a test is masked in the log from the instant it is in this process.
+    """
 
     access_token: str
     refresh_token: str
@@ -99,6 +106,9 @@ class TokenSet:
     token_type: str = "Bearer"
     user_id: str = "-"
     obtained_at: datetime = field(default_factory=utcnow)
+
+    def __post_init__(self) -> None:
+        logsecrets.remember_all((self.access_token, self.refresh_token))
 
     def seconds_left(self, now: datetime | None = None) -> float:
         return (self.expires_at - ensure_utc(now or utcnow(), field="now")).total_seconds()
@@ -216,6 +226,10 @@ class CredentialStore:
     def delete(self) -> bool:
         if not self.path.exists():
             return False
+        tokens = self.load_or_none()
+        if tokens is not None:  # stop masking what no longer exists
+            logsecrets.forget(tokens.access_token)
+            logsecrets.forget(tokens.refresh_token)
         self.path.unlink()
         return True
 

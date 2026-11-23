@@ -77,7 +77,7 @@ examples:
   fm plugins run --all --since 30d            compute metrics, deliver alerts
   fm alerts list --since 7d                   what has been flagged
   fm plugin new resting_hrv --dir ~/plugins   scaffold a plugin
-  fm doctor                                   what is wrong with this install (planned)
+  fm doctor                                   what is wrong with this install
 
 Docs: docs/storage.md (the store, retention, the read API), docs/data-import.md (backfill,
 overlaps, rate limits), docs/plugins.md (writing a plugin).
@@ -114,7 +114,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_USAGE
     try:
         session = session_from_args(args)
-        configure_logging(session.verbose, getattr(args, "quiet", False))
+        configure_logging(
+            session.verbose,
+            getattr(args, "quiet", False),
+            level=getattr(args, "log_level", None),
+            format=getattr(args, "log_format", None),
+        )
         return int(func(args, session))
     except SystemExit as exc:  # argparse --help / --error paths
         return int(exc.code or 0)

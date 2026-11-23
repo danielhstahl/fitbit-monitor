@@ -111,6 +111,28 @@ enforces is a comment, not a guarantee. Alert titles and messages *are* summarie
 findings ("resting HR up 9 bpm over 6 weeks") - that is their purpose, and they are
 local unless you configured a webhook.
 
+**Credentials are stripped by the same mechanism**, in a second filter
+(`fitbit_monitor.logsecrets`), in both the text and the `--log-format json` output:
+
+| what | how it is caught | appears as |
+|---|---|---|
+| an OAuth access or refresh token | the `TokenSet` registers both the instant it is loaded, so the value itself is masked wherever it turns up | `[REDACTED]` |
+| the OAuth client secret | `config.toml` registers it when the config is read; `client_secret=`/`"client_secret":` is also matched by name | `[REDACTED]` |
+| an `Authorization:` header, a `password=`/`api_key=` style key, a token in a query string | matched by key name, in `k=v`, `k: v`, JSON and Python-dict shape | `Bearer [REDACTED]` (the scheme survives, the credential does not) |
+| a token that appears in a traceback | the exception text goes through the same filter | `[REDACTED]` |
+
+Redaction is central rather than per-call-site on purpose: the leak that matters is the
+line nobody wrote deliberately - a debug line that interpolates a header dict, an
+`HTTPError` whose message quotes a URL, a plugin that logs the config it was handed.
+What a *call site* may not do is write a credential at all; what the filter guarantees is
+that when one does anyway, it stays out of the file. `tests/test_log_redaction.py` asserts
+it for both formats, including for a token read back from `credentials.json`.
+
+The log level is yours: `-v`/`-vv`/`-q` or `FM_LOG_LEVEL`, with `--log-format json` for
+machine-readable lines. None of those switch redaction on - it is always on, and the
+filter runs before the formatter, so `--log-format json` is not a way to see a value the
+text format would have hidden.
+
 ## Retention
 
 **Default retention: keep everything.** The API's own history is finite and this store is

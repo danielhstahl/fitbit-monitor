@@ -25,6 +25,7 @@ dir, recorded in ``dataset_run``, and mapped onto distinct exit codes.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable, Protocol, Sequence
@@ -53,6 +54,8 @@ from .report import (
     ImportReport,
     new_run_id,
 )
+
+log = logging.getLogger(__name__)
 
 #: Statuses where retrying the same request would fail the same way.
 FATAL_STATUSES = (400, 401, 403)
@@ -337,6 +340,10 @@ class ImportPlanner:
             return tuple(names), notes
         granted = tuple(self.client.tokens.scopes) if self.client.authenticated else ()
         allowed, skipped = permitted_datasets(self.profile, granted)
+        if skipped:
+            # The one record there will be that a dataset was quietly not imported: the
+            # run still exits 0, because the account genuinely has no such data.
+            log.warning("skipping %d dataset(s) with no granted scope: %s", len(skipped), ", ".join(skipped))
         notes.extend(f"not imported: {item}" for item in skipped)
         if self.profile_error:
             notes.append(self.profile_error)

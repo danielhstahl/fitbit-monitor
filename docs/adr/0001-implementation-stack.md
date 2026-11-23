@@ -184,16 +184,17 @@ a test and a plugin API version integer already protect.
 
 ### 5. CLI framework: `argparse`, and Typer stays out
 
-`fm` is nine command groups plus two flat stubs (`report`, `doctor`) - eleven names on
+`fm` is nine command groups plus two flat commands (`report`, `doctor`) - eleven names on
 the top-level parser, 27 leaf commands - spread over ten modules under `cli/`, each
 registering itself on a shared `ArgumentParser`, and the whole surface is stdlib.
 
-The two stubs are declared, not built: the scaffold ticket fixes the command surface
-first so docs, cron lines and tests can name `fm report` before its logic exists, and
-running one prints what it will do, names the commands that do the job today, and exits
-**72** (`os.EX_NOTIMPLEMENTED`) rather than tracebacks or a lie. A command that is not
-built and a command that failed are different facts and a script should be able to tell
-them apart.
+The flat ones are declared before they are built: the scaffold ticket fixes the command
+surface first so docs, cron lines and tests can name `fm report` before its logic exists,
+and a command that is not built prints what it will do, names the commands that do the job
+today, and exits **72** (`os.EX_NOTIMPLEMENTED`) rather than tracebacks or a lie. A
+command that is not built and a command that failed are different facts and a script should
+be able to tell them apart. (`fm doctor` has since been built; `fm report` is the stub left
+in that group, and `tests/test_cli.py` keeps the list honest.)
 
 Why not Typer (the recommendation), which is Click with type hints:
 
