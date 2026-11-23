@@ -17,6 +17,11 @@ Public API for plugin authors. Everything you need is importable from here::
 
 The read-only context, the emitted models and the CLI's plugin commands all come
 from this package; ``docs/plugins.md`` is the prose version.
+
+The same rules, as tests: ``fitbit_monitor.plugins.testing`` publishes
+``PluginContractTestCase`` plus seeded fixtures, and it is the suite the built-in
+plugins run in CI - inherit it and "works on my machine" becomes "passes the
+contract".
 """
 
 from __future__ import annotations

@@ -233,6 +233,23 @@ class LinksAndFacts(unittest.TestCase):
         for line in ("fm plugins list --dir", "fm plugins run x", "PluginContractTestCase"):
             self.assertIn(line, readme)
 
+    def test_the_docs_draw_the_project_the_scaffold_actually_writes(self) -> None:
+        """docs/plugins.md shows the scaffolded tree; a renamed file has to fail here."""
+        from fitbit_monitor.plugins.scaffold import scaffold_plugin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            scaffold = scaffold_plugin("resting_vs_steps", tmp, dry_run=True)
+            self.assertFalse((Path(tmp) / "resting_vs_steps").exists(), "--dry-run wrote something")
+        text = (DOCS / "plugins.md").read_text()
+        for relative in scaffold.files:
+            self.assertIn(
+                Path(relative).name,
+                text,
+                f"docs/plugins.md does not mention the scaffolded file {relative}",
+            )
+        for command in ("fm plugin new", "--dry-run", "fm plugins list --dir ."):
+            self.assertIn(command, text, f"docs/plugins.md does not document {command}")
+
 
 class HealthSourceIsDecidedOnce(unittest.TestCase):
     """ADR-0002 is where the data source gets decided, so it has to stay concrete.
@@ -457,6 +474,9 @@ class PluginContractIsDecidedOnce(unittest.TestCase):
             self.assertIn(needle, text, f"ADR-0004 §9 does not publish {needle}()")
         self.assertIn(f"{FIXTURE_DAYS} days", text, "the fixture length is not recorded")
         self.assertIn(FIXTURE_END.isoformat(), text, "the fixture end date is not recorded")
+        # The scaffold is how an author meets the suite, so its shape is decided here too.
+        self.assertIn("<name>.plugin:<Class>", text, "ADR-0004 §9 does not pin the scaffolded entry point")
+        self.assertIn("[tool.setuptools] packages", text, "ADR-0004 §9 does not pin the scaffolded layout")
 
     def test_it_documents_how_config_reaches_a_plugin(self) -> None:
         text = self.text()

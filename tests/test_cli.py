@@ -612,16 +612,34 @@ class PluginNewTest(CliTestCase):
     def test_scaffolds_and_then_runs_it(self) -> None:
         _, text = self.fm("plugin", "new", "weekly_steps", "--dir", str(self.plugins_dir), expect=0)
         self.assertIn("created", text)
-        self.assertTrue((self.plugins_dir / "weekly_steps" / "plugin.py").exists())
+        project = self.plugins_dir / "weekly_steps"
+        self.assertTrue((project / "weekly_steps" / "plugin.py").is_file())
+        self.assertTrue((project / "tests" / "test_weekly_steps.py").is_file())
+        # The next steps it prints have to be the steps that work: the project root
+        # is the drop-in directory, because discovery reads `<pkg>/plugin.py`.
+        self.assertIn(f"cd {project} && fm plugins list --dir .", text)
         self.fm("dev", "seed", "--days", "20", expect=0)
         _, text = self.fm(
-            "plugins", "run", "weekly_steps", "--since", "20d", "--dir", str(self.plugins_dir), expect=0
+            "plugins", "run", "weekly_steps", "--since", "20d", "--dir", str(project), expect=0
         )
         self.assertIn("weekly_steps: ok", text)
 
+    def test_dry_run_writes_nothing(self) -> None:
+        _, text = self.fm(
+            "plugin", "new", "weekly_steps", "--dir", str(self.plugins_dir), "--dry-run", expect=0
+        )
+        self.assertIn("would create", text)
+        self.assertIn("weekly_steps/plugin.py", text)
+        self.assertFalse((self.plugins_dir / "weekly_steps").exists())
+
     def test_json_output(self) -> None:
         _, text = self.fm("plugin", "new", "weekly_steps", "--dir", str(self.plugins_dir), "--json", expect=0)
-        self.assertEqual(json.loads(text)["name"], "weekly_steps")
+        payload = json.loads(text)
+        self.assertEqual(payload["name"], "weekly_steps")
+        self.assertEqual(payload["package"], "weekly_steps")
+        self.assertIn("weekly_steps/plugin.py", payload["files"])
+        self.assertIn("tests/test_weekly_steps.py", payload["files"])
+        self.assertFalse(payload["dry_run"])
 
     def test_bad_name_is_reported(self) -> None:
         _, text = self.fm("plugin", "new", "Bad-Name", "--dir", str(self.plugins_dir), expect=2)

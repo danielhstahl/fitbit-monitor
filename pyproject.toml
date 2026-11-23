@@ -52,7 +52,9 @@ testpaths = ["tests"]
 [tool.coverage.run]
 source = ["src/fitbit_monitor"]
 branch = true
-omit = ["*/fitbit_monitor/plugins/testing.py"]
+# Nothing is omitted: `plugins/testing.py` is the test-support module published to
+# third-party authors, and the suite they inherit is exercised here by the built-ins -
+# so its coverage counts, the same way it will count in their repos.
 
 [tool.coverage.report]
 fail_under = 85

@@ -31,14 +31,30 @@ Now write one:
 ```bash
 fm plugin new resting_vs_steps --dir ~/fm-plugins
 cd ~/fm-plugins/resting_vs_steps
-fm plugins list --dir ~/fm-plugins
-fm plugins run resting_vs_steps --since 30d --dir ~/fm-plugins
+fm plugins list --dir .                  # the project root *is* the drop-in directory
+fm plugins run resting_vs_steps --since 30d --dir .
 python -m pytest -q                      # the scaffolded contract suite
 ```
 
-`fm plugin new` writes four files: `plugin.py`, `test_<name>.py`, `pyproject.toml`
-and `README.md`. The plugin works immediately as a directory drop-in; the
-`pyproject.toml` is there for the day you want to publish it.
+`fm plugin new` writes a project, not a loose file:
+
+```
+resting_vs_steps/
+├── pyproject.toml                    # packaging + the entry-point declaration
+├── README.md                         # how to run, test and ship it
+├── resting_vs_steps/
+│   ├── __init__.py
+│   └── plugin.py                     # <- your code goes here
+└── tests/
+    ├── __init__.py
+    └── test_resting_vs_steps.py      # the shared contract suite
+```
+
+It runs immediately as a directory drop-in, because discovery reads `<pkg>/plugin.py`
+in every configured directory and `resting_vs_steps/plugin.py` is one - which is why
+`--dir` points at the project root and not at its parent. The `pyproject.toml` is
+there for the day you want to publish it, and `fm plugin new NAME --dir . --dry-run`
+prints the file list without writing anything.
 
 ---
 
@@ -385,7 +401,7 @@ The suite the built-in plugins run in CI is published for you:
 ```python
 from fitbit_monitor.plugins.testing import PluginContractTestCase
 
-from plugin import RestingVsStepsPlugin
+from resting_vs_steps.plugin import RestingVsStepsPlugin
 
 
 class TestRestingVsSteps(PluginContractTestCase):
@@ -403,15 +419,18 @@ Inheriting it buys you, against a deterministic seeded store:
 * the store it is handed cannot write, and `PluginContext` exposes nothing new.
 
 Helpers for your own tests: `fixture_store()`, `fixture_window()`, `empty_window()`,
-`make_config()`, `run_fixture_plugin()`. `python -m pytest` and
-`python -m unittest` both work.
+`make_config()`, `run_fixture_plugin()`. The store is the one `fm dev seed` writes -
+same generator, fixed length and end date - so a failure in your CI reproduces with a
+command, not a fixture file checked into a repo. `python -m pytest` and
+`python -m unittest` both work; from a scaffolded project root, run either one and
+both your file and the inherited suite are collected.
 
 ---
 
 ## Shipping it
 
 Directory drop-in is fine for personal use. To publish, declare the entry point
-(`fm plugin new` already wrote it):
+(`fm plugin new` already wrote it, in the layout setuptools expects):
 
 ```toml
 [project]
@@ -419,10 +438,28 @@ dependencies = ["fitbit-monitor"]
 
 [project.entry-points."fitbit_monitor.plugins"]
 resting_vs_steps = "resting_vs_steps.plugin:RestingVsStepsPlugin"
+
+[tool.setuptools]
+packages = ["resting_vs_steps"]
 ```
 
-`pip install` that and `fm plugins list` finds it with no configuration - which is
-also how a plugin gets to live in its own repository.
+The entry-point value is `<package>.<module>:<Class>`, and `[tool.setuptools]
+packages` has to name the directory that holds it - a build fails with
+`package directory 'resting_vs_steps' does not exist` when an editor or a refactor
+moves the package out from under it. `pip install -e .` (or a wheel from
+`python -m build`) and `fm plugins list` finds it with no configuration and no
+`--dir` - which is also how a plugin gets to live in its own repository:
+
+```console
+$ fm plugins list
+NAME           VERSION  SOURCE       DATASETS
+my_metric      0.1.0    entry_point  daily_summary
+resting_trend  0.1.0    builtin      daily_summary, hrv, heart_rate
+```
+
+One caveat on `[project] dependencies`: fitbit-monitor is not on PyPI yet, so the
+scaffold ships that list empty and tells you to install the host from the checkout
+(`pip install /path/to/fitbit-monitor`) until it is.
 
 Versioning: `PLUGIN_API_VERSION` is bumped when the contract changes incompatibly.
 A plugin declares what it needs with `requires_api`; a host older than that refuses

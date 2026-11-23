@@ -474,7 +474,11 @@ class TestMyPlugin(PluginContractTestCase):
 ```
 
 `fm plugin new` scaffolds that file, so a new plugin is held to the contract from its
-first commit. The suite needs no fixtures of its own: `fixture_store()` writes a
+first commit. It scaffolds a project rather than a loose file - `<name>/<name>/plugin.py`,
+`<name>/tests/test_<name>.py`, and a `pyproject.toml` whose entry point is
+`<name>.plugin:<Class>` with `[tool.setuptools] packages` naming the package that holds
+it - so the drop-in copy (§5) and the installed distribution are the same code and are
+held to the same rules. The suite needs no fixtures of its own: `fixture_store()` writes a
 deterministic seeded store (45 days, fixed end date `2026-05-31`, fixed seed),
 `fixture_window()` matches it, `empty_window()` is the no-data path, and
 `run_fixture_plugin()` runs a plugin exactly the way the CLI does.

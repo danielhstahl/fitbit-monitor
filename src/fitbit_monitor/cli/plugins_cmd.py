@@ -94,6 +94,9 @@ def register(sub: "argparse._SubParsersAction") -> None:
     pnew.add_argument("--dataset", default="daily_summary", help="dataset the scaffold reads (default daily_summary)")
     pnew.add_argument("--field", default="resting_hr", help="field the scaffold averages (default resting_hr)")
     pnew.add_argument("--force", action="store_true", help="write into a non-empty directory")
+    pnew.add_argument(
+        "--dry-run", action="store_true", help="print the files this would write, and write nothing"
+    )
     pnew.add_argument("--json", action="store_true")
     pnew.set_defaults(func=cmd_plugin_new)
 
@@ -325,16 +328,23 @@ def cmd_plugin_new(args: argparse.Namespace, session: Session) -> int:
         force=args.force,
         dataset=args.dataset,
         field=args.field,
+        dry_run=getattr(args, "dry_run", False),
     )
     if args.json:
         print_json(result.as_dict())
         return EXIT_OK
-    print(f"created {result.directory}")
+    verb = "would create" if result.dry_run else "created"
+    print(f"{verb} {result.directory}")
     for name in result.files:
         print(f"  {name}")
+    if result.dry_run:
+        print("\nnothing was written - drop --dry-run to write it")
+        return EXIT_OK
     print("\nnext:")
-    print(f"  fm plugins list --dir {result.directory.parent}")
-    print(f"  fm plugins run {result.name} --since 30d --dir {result.directory.parent}")
+    # The project root is itself a valid drop-in directory: discovery reads
+    # `<pkg>/plugin.py` in every configured directory, and `<name>/plugin.py` is it.
+    print(f"  cd {result.directory} && fm plugins list --dir .")
+    print(f"  fm plugins run {result.name} --since 30d --dir {result.directory}")
     print(f"  cd {result.directory} && python -m pytest -q")
     return EXIT_OK
 

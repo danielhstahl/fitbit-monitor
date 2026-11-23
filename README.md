@@ -57,9 +57,10 @@ Write a plugin:
 
 ```bash
 fm plugin new resting_vs_steps --dir ~/fm-plugins
-fm plugins list --dir ~/fm-plugins
-fm plugins run resting_vs_steps --since 30d --dir ~/fm-plugins
-cd ~/fm-plugins/resting_vs_steps && python -m pytest -q
+cd ~/fm-plugins/resting_vs_steps     # the project root is itself a drop-in directory
+fm plugins list --dir .
+fm plugins run resting_vs_steps --since 30d --dir .
+python -m pytest -q                  # the scaffolded contract suite, same one CI runs
 ```
 
 ## Commands
@@ -83,7 +84,7 @@ cd ~/fm-plugins/resting_vs_steps && python -m pytest -q
 | `fm plugins show NAME [--json]` | one plugin's metadata, options, effective config, unused config keys |
 | `fm plugins validate [NAME ...]` | load and configure plugins without running them |
 | `fm plugins run [NAME ...] [--all] [--since D] [--until D] [--set NAME.KEY=VAL] [--json] [--timeout S] [--no-deliver]` | run plugins over a range and deliver their alerts |
-| `fm plugin new NAME [--dir DIR] [--force]` | scaffold a plugin that already passes the contract tests |
+| `fm plugin new NAME [--dir DIR] [--force] [--dry-run]` | scaffold a plugin that already passes the contract tests |
 | `fm alerts list [--since D] [--severity S] [--plugin P] [--json]` | read the stored alert history |
 | `fm report [--since D] [--until D] [--json]` | **planned, not implemented** (exit 72): one document over a range; today: `fm import report`, `fm store stats`, `fm alerts list` |
 | `fm doctor [--quick] [--json]` | **planned, not implemented** (exit 72): one-pass install diagnosis; today: `fm config show`, `fm auth status`, `fm db status`, `fm store verify`, `fm plugins validate` |
