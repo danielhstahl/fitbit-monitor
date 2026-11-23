@@ -1,15 +1,17 @@
 {
   "cases": {
-    "discover_plugins": 1.062,
-    "downsample_to_days": 429761.821,
-    "plugin_resting_trend": 5.873,
-    "scan_intraday": 578638.187,
-    "seed_corpus": 128231.575
+    "discover_plugins": 1.112,
+    "downsample_to_days": 417004.092,
+    "hr_daily_features": 206.461,
+    "plugin_resting_trend": 6.071,
+    "scan_intraday": 550967.921,
+    "seed_corpus": 127013.986
   },
   "days": 90,
   "direction": {
     "discover_plugins": "lower",
     "downsample_to_days": "higher",
+    "hr_daily_features": "higher",
     "plugin_resting_trend": "lower",
     "scan_intraday": "higher",
     "seed_corpus": "higher"
@@ -18,11 +20,11 @@
     "cpu_count": 8,
     "git": {
       "branch": "master",
-      "commit": "9d77e48f3cd93bccb8a8b53cce71f482742cd7b1",
+      "commit": "cafe068bd2d9eed987c52dc563c98b7bd3a28b98",
       "dirty": true,
-      "short": "9d77e48"
+      "short": "cafe068"
     },
-    "hostname": "d9e2dd08881c",
+    "hostname": "a10f4c2f2276",
     "implementation": "CPython",
     "machine": "aarch64",
     "memory_gib": 7.7,
@@ -32,48 +34,56 @@
     "release": "7.0.14-linuxkit",
     "system": "Linux"
   },
-  "recorded_utc": "2026-11-22T17:54:55+00:00",
+  "recorded_utc": "2026-11-23T14:15:51+00:00",
   "stats": {
     "discover_plugins": {
-      "best": 1.062,
+      "best": 1.112,
       "iterations": 180,
-      "mean": 1.158,
-      "stddev": 0.316,
-      "worst": 4.475
+      "mean": 1.174,
+      "stddev": 0.112,
+      "worst": 2.129
     },
     "downsample_to_days": {
-      "best": 429761.821,
+      "best": 417004.092,
       "iterations": 9,
-      "mean": 419734.392,
-      "stddev": 8963.139,
-      "worst": 399350.922
+      "mean": 409404.103,
+      "stddev": 15647.466,
+      "worst": 367861.557
+    },
+    "hr_daily_features": {
+      "best": 206.461,
+      "iterations": 9,
+      "mean": 203.86,
+      "stddev": 1.765,
+      "worst": 201.325
     },
     "plugin_resting_trend": {
-      "best": 5.873,
+      "best": 6.071,
       "iterations": 45,
-      "mean": 6.371,
-      "stddev": 1.367,
-      "worst": 15.058
+      "mean": 6.402,
+      "stddev": 1.355,
+      "worst": 15.133
     },
     "scan_intraday": {
-      "best": 578638.187,
+      "best": 550967.921,
       "iterations": 9,
-      "mean": 571993.501,
-      "stddev": 8756.779,
-      "worst": 550564.838
+      "mean": 545689.434,
+      "stddev": 8090.846,
+      "worst": 530348.188
     },
     "seed_corpus": {
-      "best": 128231.575,
+      "best": 127013.986,
       "iterations": 9,
-      "mean": 114403.441,
-      "stddev": 23301.466,
-      "worst": 67423.494
+      "mean": 123978.619,
+      "stddev": 2611.713,
+      "worst": 119551.519
     }
   },
   "tolerance_percent": 15.0,
   "units": {
     "discover_plugins": "ms",
     "downsample_to_days": "points/sec",
+    "hr_daily_features": "days/sec",
     "plugin_resting_trend": "ms",
     "scan_intraday": "points/sec",
     "seed_corpus": "rows/sec"

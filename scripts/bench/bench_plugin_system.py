@@ -18,6 +18,7 @@ case                 what                                                    rea
 seed_corpus          writing the corpus (the ingest path)                    rows/sec
 scan_intraday        the read API iterating every stored point               points/sec
 downsample_to_days   bucketing every intraday point by day                   points/sec
+hr_daily_features    the heart-rate feature library over the whole corpus    days/sec
 plugin_resting_trend the shipped plugin over the whole corpus                 ms  (lower)
 discover_plugins     registry discovery, validation and error isolation       ms  (lower)
 ==================== ======================================================= ==============
@@ -76,6 +77,7 @@ if str(REPO_ROOT / "src") not in sys.path:  # runnable from a bare checkout
 from fitbit_monitor.plugins.registry import PluginRegistry  # noqa: E402
 from fitbit_monitor.plugins.runner import run_plugins  # noqa: E402
 from fitbit_monitor.config import AppConfig  # noqa: E402
+from fitbit_monitor.hr import FeatureOptions, daily_features  # noqa: E402
 from fitbit_monitor.store.downsample import downsample  # noqa: E402
 from fitbit_monitor.store.reader import ReadOnlyStore  # noqa: E402
 from fitbit_monitor.store.seed import seed_store  # noqa: E402
@@ -195,6 +197,22 @@ def build_cases(store_path: Path, window: DateRange, days: int) -> list[Case]:
             raise RuntimeError("downsample produced no buckets")
         return total_points / elapsed
 
+    def hr_features() -> float:
+        """Every per-day heart-rate feature over the corpus, as days/second.
+
+        This is the case that says "the feature library fits the Epic 6 budget": the
+        detection plugin will ask for these rows on every run, so a nine-second feature
+        pass would dominate everything else in this file. One store read plus one pass per
+        day is the property being asserted - a per-day query version of the same work would
+        show up here as a cliff.
+        """
+        started = time.perf_counter()
+        rows = daily_features(store, window.since, window.until, options=FeatureOptions(tz=UTC))
+        elapsed = time.perf_counter() - started
+        if not rows or not any(row.usable for row in rows):
+            raise RuntimeError("heart-rate features produced no usable day")
+        return len(rows) / elapsed
+
     def plugin_run() -> float:
         started = time.perf_counter()
         report = run_plugins(registry, store, window, config=config, names=["resting_trend"])
@@ -214,6 +232,7 @@ def build_cases(store_path: Path, window: DateRange, days: int) -> list[Case]:
         Case("seed_corpus", "write the synthetic corpus", "rows/sec", seed_throughput),
         Case("scan_intraday", "read API over every stored point", "points/sec", scan),
         Case("downsample_to_days", "bucket every intraday point by day", "points/sec", to_days),
+        Case("hr_daily_features", "heart-rate feature library over the corpus", "days/sec", hr_features),
         Case(
             "plugin_resting_trend", "shipped plugin over the corpus", "ms", plugin_run,
             better="lower", sample_factor=5,

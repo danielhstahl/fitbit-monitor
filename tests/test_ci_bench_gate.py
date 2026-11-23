@@ -119,6 +119,7 @@ class StatisticTest(unittest.TestCase):
             "seed_corpus": 1,
             "scan_intraday": 1,
             "downsample_to_days": 1,
+            "hr_daily_features": 1,
             "plugin_resting_trend": 5,
             "discover_plugins": 20,
         }
@@ -131,7 +132,7 @@ class StatisticTest(unittest.TestCase):
         self.assertEqual([c.name for c in built], list(factors))
         for made in built:
             self.assertEqual(made.sample_factor, factors[made.name], made.name)
-            self.assertIn(made.unit, ("rows/sec", "points/sec", "ms"))
+            self.assertIn(made.unit, ("rows/sec", "points/sec", "days/sec", "ms"))
             self.assertIn(made.better, ("higher", "lower"))
 
 
