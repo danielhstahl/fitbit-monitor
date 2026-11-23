@@ -6,6 +6,8 @@ the cooldown updates the row instead of notifying again.
 """
 
 import json
+import logging
+import sqlite3
 import tempfile
 import unittest
 from datetime import timedelta
@@ -236,6 +238,17 @@ class DispatcherTest(SinksHistoryTestCase):
         self.assertTrue(delivery.is_new)
         self.assertEqual(delivery.delivered_to, ("counter",))
 
+    def test_an_unwritable_history_degrades_to_delivery_without_dedup(self):
+        """A store that refuses the write must cost dedup, not the alert or the run."""
+        dispatcher = self.dispatcher()
+        dispatcher.history = LockedHistory()
+        with self.assertLogs("fitbit_monitor.sinks", level=logging.WARNING) as captured:
+            delivery = dispatcher.dispatch(make_alert())
+        self.assertTrue(delivery.is_new)
+        self.assertEqual(delivery.delivered_to, ("counter",))
+        self.assertEqual(self.counter.calls, [delivery.alert.effective_dedup_key])
+        self.assertTrue(any("readonly database" in line for line in captured.output), captured.output)
+
     def test_failures_are_listed_for_the_report(self):
         dispatcher = self.dispatcher()
         dispatcher.dispatch(make_alert())
@@ -253,6 +266,16 @@ class BrokenHistory:
         from fitbit_monitor.errors import FmError
 
         raise FmError("history is on a broken disk")
+
+
+class LockedHistory:
+    """What sqlite raises for a read-only mount, a full disk or a locked database.
+
+    Not an ``FmError``, so the dispatcher's broad handler is what catches it.
+    """
+
+    def record(self, alert, cooldown):
+        raise sqlite3.OperationalError("attempt to write a readonly database")
 
 
 class AlertHistoryQueryTest(SinksHistoryTestCase):
@@ -298,6 +321,35 @@ class AlertHistoryQueryTest(SinksHistoryTestCase):
         self.assertIsNone(self.history.latest("absent-key"))
         self.assertEqual(self.history.list(), [])
         self.assertEqual(self.history.count(), 0)
+
+    def test_a_milder_repeat_does_not_demote_the_stored_severity(self):
+        """One dedup key keeps the level its episode peaked at, whatever arrives next.
+
+        Custom keys are how a plugin groups an episode (``night-7``), so a milder
+        reading that shares the key must not file the episode under ``info`` and
+        hide it from ``fm alerts list --severity critical``.
+        """
+        first, _ = self.history.record(
+            make_alert(severity="critical", dedup_key="night-7", occurred_at=support.utc(2, 0)), timedelta(hours=36)
+        )
+        repeat, is_new = self.history.record(
+            make_alert(severity="info", dedup_key="night-7", occurred_at=support.utc(2, 20)), timedelta(hours=36)
+        )
+        self.assertFalse(is_new)
+        self.assertEqual(repeat.alert_id, first.alert_id)
+        self.assertEqual(self.history.latest("night-7").severity, Severity.CRITICAL)
+        self.assertEqual(self.history.occurrences("night-7"), 2)
+        self.assertEqual([a.key for a in self.history.list(severity="critical")], [first.key])
+
+    def test_a_severer_repeat_does_raise_the_stored_severity(self):
+        self.history.record(
+            make_alert(severity="info", dedup_key="climb", occurred_at=support.utc(4, 0)), timedelta(hours=36)
+        )
+        self.history.record(
+            make_alert(severity="critical", dedup_key="climb", occurred_at=support.utc(4) + timedelta(hours=5)),
+            timedelta(hours=36),
+        )
+        self.assertEqual(self.history.latest("climb").severity, Severity.CRITICAL)
 
     def test_records_the_window_and_evidence(self):
         alert = make_alert(window_start=support.utc(1), window_end=support.utc(2), evidence=[(support.utc(1), 5.0)])

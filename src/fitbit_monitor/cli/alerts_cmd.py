@@ -25,7 +25,7 @@ def register(sub: "argparse._SubParsersAction") -> None:
     listing.add_argument("--severity", default=None, choices=["info", "warning", "critical"],
                          help="this severity or higher")
     listing.add_argument("--plugin", default=None, help="only this plugin's alerts")
-    listing.add_argument("--limit", type=int, default=50)
+    listing.add_argument("--limit", type=int, default=50, help="at most this many rows (0 means no limit)")
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(func=cmd_alerts_list)
     return alerts

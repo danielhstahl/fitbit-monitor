@@ -50,11 +50,13 @@ class AlertHistory:
           twice does not double-count anything;
         * the key is known and ``occurred_at`` is after the stored one but within the
           cooldown - the **same episode again**: update the row, bump ``occurrences``,
-          and do not notify again.
+          and do not notify again. The stored severity stays at the highest level the
+          key has reached, so a milder repeat never demotes an episode that already
+          peaked at ``critical``.
         """
         occurred = ensure_utc(alert.occurred_at, field="alert.occurred_at")
         row = self.conn.execute(
-            "SELECT id, first_emitted_at, occurrences, last_seen_at FROM alerts "
+            "SELECT id, first_emitted_at, occurrences, last_seen_at, severity FROM alerts "
             "WHERE dedup_key = ? ORDER BY last_seen_at DESC LIMIT 1",
             (alert.effective_dedup_key,),
         ).fetchone()
@@ -72,12 +74,19 @@ class AlertHistory:
                     False,
                 )
             if last_seen is not None and occurred - last_seen <= cooldown:
+                # A repeat refreshes the row without taking anything away from it. The stored
+                # severity stays at the highest level this dedup key has reached, so a milder
+                # reading that arrives later cannot demote an episode that already peaked at
+                # critical and make it invisible to `fm alerts list --severity critical`.
+                peak = alert.severity
+                if not peak.at_least(row["severity"]):
+                    peak = Severity.parse(row["severity"])
                 self.conn.execute(
                     "UPDATE alerts SET last_seen_at = ?, occurrences = occurrences + 1, severity = ?, "
                     "confidence = COALESCE(?, confidence), evidence = ? WHERE id = ?",
                     (
                         occurred.isoformat(),
-                        alert.severity.value,
+                        peak.value,
                         alert.confidence,
                         json.dumps([e.as_dict() for e in alert.evidence], sort_keys=True),
                         row["id"],

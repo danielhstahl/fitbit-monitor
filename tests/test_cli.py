@@ -11,11 +11,14 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from fitbit_monitor.cli import build_parser, main
@@ -466,10 +469,143 @@ class AlertDeliveryTest(CliTestCase):
         _, text = self.fm("alerts", "list", "--plugin", "nightly_dip", "--limit", "3", "--json", expect=0)
         self.assertTrue(json.loads(text)["alerts"])
 
+    def test_alerts_list_limit_zero_is_everything(self) -> None:
+        """`--limit 1` is a page; `--limit 0` is the whole history, not an empty one."""
+        self.fm("plugins", "run", "nightly_dip", "--since", "20d", "--dir", str(self.plugins_dir), expect=0)
+        _, one = self.fm("alerts", "list", "--limit", "1", "--json", expect=0)
+        _, everything = self.fm("alerts", "list", "--limit", "0", "--json", expect=0)
+        self.assertEqual(len(json.loads(one)["alerts"]), 1)
+        self.assertGreater(len(json.loads(everything)["alerts"]), 1)
+
     def test_alerts_list_without_a_store(self) -> None:
         self.store_path.unlink()
         _, text = self.fm("alerts", "list", expect=4)
         self.assertIn("nothing has run yet", text)
+
+
+class AlertWebhookTest(CliTestCase):
+    """The one outbound path, driven through the real command line.
+
+    The webhook is the only place health-derived data may leave the machine, so the
+    gate - HTTPS unless the user explicitly overrides it, the body no larger than
+    the alert, a dead endpoint costing nothing but the delivery - is tested here and
+    not only at the sink level. Everything is loopback: no test here reaches the
+    internet.
+    """
+
+    #: The whole webhook body: the alert, and nothing that identifies this machine.
+    ALERT_BODY_KEYS = {
+        "plugin",
+        "key",
+        "title",
+        "message",
+        "severity",
+        "occurred_at",
+        "confidence",
+        "evidence",
+        "dedup_key",
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fm("dev", "seed", "--days", "20", expect=0)
+        support.write_plugin_file(self.plugins_dir, "nightly_dip.py", ALERTING_PLUGIN)
+        self.config_path = self.home / "config" / "fitbit-monitor" / "config.toml"
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def configure(self, url: str, *, enabled: bool = True) -> None:
+        self.config_path.write_text(
+            "[plugins.nightly_dip]\nfloor = 200.0\n\n[alerts]\ncooldown = \"36h\"\njsonl = false\n\n"
+            f"[alerts.webhook]\nurl = \"{url}\"\nenabled = {'true' if enabled else 'false'}\n"
+        )
+
+    def run_hook(self, *extra: str, **kw) -> tuple[int, str]:
+        return self.fm(
+            "plugins", "run", "nightly_dip", "--since", "20d", "--dir", str(self.plugins_dir), *extra, **kw
+        )
+
+    def test_plaintext_url_is_refused_and_nothing_is_sent(self) -> None:
+        with LoopbackWebhook() as hook:
+            self.configure(hook.url)
+            _, text = self.run_hook(expect=2)
+            self.assertIn("must be https://", text)
+            self.assertIn("allow_insecure", text, "the refusal names the way out")
+            self.assertEqual(hook.requests, [], "a refused URL must not be contacted at all")
+
+    def test_a_configured_but_disabled_webhook_is_not_used(self) -> None:
+        with LoopbackWebhook() as hook:
+            self.configure(hook.url, enabled=False)
+            self.run_hook(expect=0)
+            self.assertEqual(hook.requests, [])
+
+    def test_the_insecure_flag_is_what_allows_a_loopback_url(self) -> None:
+        with LoopbackWebhook() as hook:
+            self.configure(hook.url)
+            self.run_hook("--allow-insecure-webhook", expect=0)
+            self.assertTrue(hook.requests, "the flag is what lets the loopback endpoint be used")
+            for request in hook.requests:
+                body = json.loads(request["body"])
+                self.assertEqual(set(body), self.ALERT_BODY_KEYS, "the body is the alert and nothing else")
+                self.assertEqual(body["plugin"], "nightly_dip")
+                self.assertNotIn("store", request["body"])
+
+    def test_a_dead_endpoint_is_logged_and_costs_the_run_nothing(self) -> None:
+        """HTTPS needs no flag; an unreachable endpoint is a warning, never a failed run."""
+        self.configure(f"https://127.0.0.1:{closed_port()}/hook")
+        with self.assertLogs("fitbit_monitor.sinks", level="WARNING") as captured:
+            self.run_hook(expect=0)
+        self.assertTrue(
+            any("webhook POST" in line and "still stored locally" in line for line in captured.output),
+            captured.output,
+        )
+        _, listing = self.fm("alerts", "list", "--json", expect=0)
+        self.assertGreaterEqual(json.loads(listing)["count"], 1, "the alert is kept even though delivery failed")
+
+
+class LoopbackWebhook:
+    """A throwaway HTTP endpoint on 127.0.0.1 that records what it was POSTed."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                outer.requests.append(
+                    {"path": self.path, "body": self.rfile.read(length).decode(), "type": self.headers.get("Content-Type")}
+                )
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args) -> None:
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}/hook"
+
+    def __enter__(self) -> "LoopbackWebhook":
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+def closed_port() -> int:
+    """A port on loopback that is almost certainly nobody's: bound, then released."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
 
 
 class PluginNewTest(CliTestCase):

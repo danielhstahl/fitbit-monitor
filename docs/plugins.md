@@ -333,11 +333,14 @@ An alert emitted by any plugin is stored first and delivered second:
 
 Before any of that, the dispatcher applies **dedup and cooldown**. An alert whose
 `dedup_key` was already seen inside `alerts.cooldown` (default 36h) updates the
-stored row - `occurrences + 1`, `last_seen_at` moved - and is **not** delivered
+stored row - `occurrences + 1`, `last_seen_at` moved, and never a *lower*
+severity than the key has already reached - and is **not** delivered
 again. One overnight episode is one notification, and the history still shows that
 it recurred. Re-running the same range twice is also a no-op: an alert not *newer*
 than what is stored changes nothing, so `fm plugins run` is safe to re-run, retry,
-or put in cron.
+or put in cron. If the store cannot take the write at all - full disk, read-only
+mount, locked by another process - `fm` logs a warning and delivers the alert
+without dedup: a broken history costs repeats, not the alert and not the run.
 
 ```console
 $ fm alerts list --since 7d
@@ -351,8 +354,9 @@ SEEN              SEVERITY  PLUGIN/KEY              TITLE
 
 `alerts.webhook.url` is the only place fitbit-monitor sends data off the machine.
 It is off unless configured, it refuses any scheme that is not `https://`
-(the `allow_insecure` override exists for a loopback test endpoint and logs a
-warning when used), it sends a body containing *only* the alert - no store paths,
+(`alerts.webhook.allow_insecure = true`, or `--allow-insecure-webhook` for one run,
+is the override and exists for a loopback test endpoint; it logs a warning when
+used), it sends a body containing *only* the alert - no store paths,
 no config, nothing from other plugins - and a failed POST is logged, never raised:
 the alert stays in local history and the run still succeeds.
 

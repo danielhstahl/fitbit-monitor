@@ -7,7 +7,9 @@ sink swallows its own failure, logs it, and reports it in the run record.
 
 The dispatcher owns the policy that sinks must agree on: **dedup**. An alert whose
 dedup key was already seen inside the cooldown window updates its stored row and
-is *not* delivered again, so one overnight episode is one notification.
+is *not* delivered again, so one overnight episode is one notification. A store
+that cannot take that write - full disk, read-only mount, locked by another
+process - degrades to delivering without dedup rather than failing the run.
 
 Outbound traffic: :class:`WebhookSink` is the only place in this package that
 opens a socket, and it refuses anything that is not ``https://`` unless the user
@@ -199,6 +201,13 @@ class AlertDispatcher:
                 stored, is_new = self.history.record(alert, self.cooldown)
             except FmError as exc:
                 log.warning("alert history unavailable (%s); delivering without dedup", exc)
+            except Exception as exc:  # noqa: BLE001 - a full disk must not swallow the alert
+                # sqlite raises plain OperationalError for "disk full", "read-only database"
+                # and "database is locked". Losing dedup is bad; losing the alert and the run
+                # is worse, so the alert goes out un-deduped and the reason is logged.
+                log.warning(
+                    "alert history write failed (%s: %s); delivering without dedup", type(exc).__name__, exc
+                )
         if not is_new:
             log.debug(
                 "suppressing repeat of %s within cooldown (%s occurrences so far)",
