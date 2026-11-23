@@ -160,6 +160,12 @@ fi
 
 echo
 echo "== test suite (unittest, so pytest is optional)"
+# Say out loud which repository's suite is live. The suite runs scripts/ci/post_commit.sh
+# (tests/test_ci_post_commit.py drives it end to end), and that script runs this gate - so
+# the two are a cycle unless the nested call can see it is already inside a run of this
+# same root. post_commit.sh refuses exactly that, and nothing else; see its recursion
+# guard. An ordinary run never has the marker set.
+export FITBIT_CI_SUITE="$PWD"
 "$PYTHON" -m unittest discover -s tests -t tests -q
 
 echo

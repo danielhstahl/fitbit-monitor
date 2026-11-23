@@ -145,7 +145,8 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
 * [docs/data-policy.md](docs/data-policy.md) - what leaves the machine (the API you
   ask, and one webhook).
 * [docs/ci.md](docs/ci.md) - the two gates, what each one stops, the artifacts they
-  write, and the one explicit command that refreshes the benchmark baseline.
+  write, the one explicit command that refreshes the benchmark baseline, and running
+  both jobs after every commit through act-mcp (`scripts/ci/post_commit.sh`).
 
 ## Development
 
@@ -175,7 +176,16 @@ anywhere else in this repository (not in `.github/workflows/*.yml`, not in a Mak
 ./scripts/ci/coverage.sh --no-install     # unittest + pytest, then the floors; prints `coverage: NN.N%`
 ./scripts/ci/bench.sh --no-install     # compare against benchmarks/baseline.json
 ./scripts/ci/post_commit.sh --quick       # skip the benchmark
+./scripts/git-hooks/install.sh            # opt-in: run those gates after every commit (AGENTS.md rule)
+./scripts/git-hooks/install.sh --remove   # take the hook back out
 ```
+
+`scripts/ci/post_commit.sh` is the one command for "the gates, now": it resolves the
+repository root itself and runs the lint, coverage and benchmark jobs through the best
+runner it finds - `act-mcp` (configured in `.pi/mcp.json`), then `act`, then the gate
+scripts directly - and ends with one PASS/FAIL block carrying the coverage percentage
+and the benchmark verdict. See [docs/ci.md](docs/ci.md#after-every-commit-act-mcp-then-act-then-the-scripts)
+for the exact act-mcp invocation and which workflows are act-safe.
 
 **Without uv**, `pip` installs the same toolchain - `uv sync --extra dev` is the fast
 path and `uv.lock` is the pin, but nothing in the repository depends on uv being
@@ -247,7 +257,9 @@ src/fitbit_monitor/
 docs/          storage.md, plugins.md, data-import.md, data-policy.md, ci.md, adr/
 scripts/       _python.sh - the one interpreter resolver; no script guesses at python3
                dev/{bootstrap,lint,typecheck,test,coverage,bench,check,docs}.sh + record_fixtures.py - what you type;
-               ci/{lint,typecheck,coverage,bench,post_commit}.sh + _coverage_report.py - the gates; bench/, docs/
+               ci/{lint,typecheck,coverage,bench,post_commit}.sh + _coverage_report.py, _act_mcp.py,
+               _gate_summary.py - the gates; bench/, docs/
+               git-hooks/{post-commit,install}.sh - the opt-in after-commit runner, installed by hand
 tests/         stdlib unittest - runs under pytest or `python -m unittest discover`
 tooling        configured in pyproject.toml, pinned in uv.lock - no config files to drift
 ```

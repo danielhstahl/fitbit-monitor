@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# The git `post-commit` hook, opt-in: it runs the CI coverage and benchmark jobs after
+# every commit.
+#
+# This is the "an MCP action runner exists, so the gates run after every commit" rule
+# (AGENTS.md) enforced by git itself rather than by remembering: the commit happens, and
+# the same two jobs the workflows define run against the workspace that just changed.
+# It runs scripts/ci/post_commit.sh, so act-mcp is tried first (with this repository's
+# root as the workspace), `act` second, and the gate scripts themselves third - and the
+# last thing printed is the combined PASS/FAIL block with the coverage percentage and
+# the benchmark regression verdict.
+#
+# Install (once per clone) and remove:
+#
+#     ./scripts/git-hooks/install.sh            # symlinks this file into .git/hooks/
+#     ./scripts/git-hooks/install.sh --remove   # undo it, if the hook is still ours
+#
+# Behaviour, and why:
+#
+# * A gate failure does not undo the commit - the commit is already recorded by the time
+#   a post-commit hook runs, and the point of the hook is the report. Exit status is
+#   therefore 0 even when a gate is red; set POST_COMMIT_STRICT=1 to have the hook exit
+#   nonzero as well (for a script or loop that wants the failure as a status).
+# * Set POST_COMMIT_SKIP=1 to skip once, e.g. `POST_COMMIT_SKIP=1 git commit --amend`.
+# * Set POST_COMMIT_ARGS='--quick' to skip the benchmark on every commit (the coverage
+#   gate still runs); see `scripts/ci/post_commit.sh --help` for the rest.
+# * Hooks do not inherit your interactive PATH in GUI clients, so the usual places are
+#   added to PATH here rather than assumed.
+set -euo pipefail
+
+PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+export PATH
+
+if [[ "${POST_COMMIT_SKIP:-0}" == 1 ]]; then
+    echo "post-commit: POST_COMMIT_SKIP=1, gates skipped"
+    exit 0
+fi
+
+# Resolve this script's own directory through symlinks - the hook in .git/hooks is a
+# symlink to this file, and the repository root is two levels up from the file that is
+# really running (the same trick scripts/ci/post_commit.sh uses for the same reason).
+here="${BASH_SOURCE[0]}"
+while [[ -L "$here" ]]; do
+    link="$(readlink "$here")"
+    case "$link" in
+        /*) here="$link" ;;
+        *) here="$(cd "$(dirname "$here")/$(dirname "$link")" && pwd)/$(basename "$link")" ;;
+    esac
+done
+here="$(cd "$(dirname "$here")" && pwd)"
+
+if [[ -d "$here/../../scripts/ci" ]]; then
+    root="$(cd "$here/../.." && pwd)"
+elif top="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    root="$top"
+else
+    echo "post-commit: cannot find the repository root from $here" >&2
+    echo "  fix: re-install the hook with ./scripts/git-hooks/install.sh from the clone's root" >&2
+    exit 1
+fi
+
+runner="$root/scripts/ci/post_commit.sh"
+if [[ ! -x "$runner" ]]; then
+    echo "post-commit: $runner is missing or not executable" >&2
+    echo "  fix: git checkout scripts/ci/post_commit.sh && chmod +x scripts/ci/post_commit.sh" >&2
+    exit 1
+fi
+
+echo "post-commit: running the CI gates for $root (HEAD $(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo '?'))"
+status=0
+# shellcheck disable=SC2086  # POST_COMMIT_ARGS is deliberately word-split, e.g. --quick
+"$runner" ${POST_COMMIT_ARGS:-} || status=$?
+
+if [[ "$status" -ne 0 ]]; then
+    echo >&2
+    echo "post-commit: a gate FAILED (exit $status). The commit is recorded; fix it before pushing." >&2
+    echo "  fix: read the block above, then re-run: ./scripts/ci/post_commit.sh" >&2
+    if [[ "${POST_COMMIT_STRICT:-0}" == 1 ]]; then
+        exit "$status"
+    fi
+fi
+exit 0

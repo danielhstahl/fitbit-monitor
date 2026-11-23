@@ -35,6 +35,89 @@ comment on); everything else, including both artifact uploads, runs. `bench.yml`
 matched job-for-job by `scripts/ci/post_commit.sh`, so a machine with no container
 runtime still runs the identical gates.
 
+## After every commit: act-mcp, then act, then the scripts
+
+`AGENTS.md` asks for one thing beyond the two workflows: when an MCP action runner is
+configured, the coverage and benchmark jobs run after **every commit**, not only on a
+push. This workspace has one - the `act-mcp` entry in `.pi/mcp.json` - and the thing
+that honours that rule is `scripts/ci/post_commit.sh`. It resolves the repository root
+itself and passes it to the server as the workspace, because the failure it exists to
+fix was a path failure and not a workflow failure:
+
+```
+act-mcp: workspace /Users/.../fitbit-monitor has no `.github` directory, so there are
+no GitHub Actions workflows to run
+  fix: point --workspace at the repository root that contains .github/workflows/*.yml
+```
+
+The root is resolved in this order, and the first candidate holding `.github/workflows`
+wins: `--workspace`, then the working directory and each of its parents, then
+`git rev-parse --show-toplevel`, then the tree the script file itself lives in. The
+caller's tree is tried before the script's own so a test or a wrapper running this file
+against another checkout gets the checkout it asked for; an explicit `--workspace` that
+is not a repository root is refused with a `fix:` line naming the path, because an
+ignored workspace is the very bug being fixed.
+
+Both workflows are **act-safe** - `ci.yml` (jobs `lint`, `coverage`) and `bench.yml`
+(job `benchmark`) need no secret, no network beyond the package index, and nothing but
+the interpreter in `.python-version`, so a container runner can run them verbatim. Three
+runners are tried in this order, and the first that works is reported in the output:
+
+| runner | what runs | the call behind it |
+| --- | --- | --- |
+| `act-mcp` | the job, in the runner the MCP server manages | `scripts/ci/_act_mcp.py run --workspace "$PWD" --workflow ci.yml --job coverage` |
+| `act` | the workflow file itself, locally | `act -j coverage --artifact-server-path /tmp/artifacts`, `act -j benchmark --artifact-server-path /tmp/artifacts` |
+| `direct` | the two gate scripts, in this checkout | `./scripts/ci/coverage.sh --no-install`, then `./scripts/ci/bench.sh --no-install` |
+
+The exact invocations, from a clean clone:
+
+```bash
+./scripts/ci/post_commit.sh                # every job, best runner available - exits 0 when all are green
+./scripts/ci/post_commit.sh --quick        # same, skipping the benchmark (what the commit hook runs)
+./scripts/ci/post_commit.sh --via act-mcp  # insist on the MCP runner, still falling back unless --no-fallback
+./scripts/ci/post_commit.sh --dry-run      # print the resolved workspace, the runner and the calls, run nothing
+./scripts/ci/_act_mcp.py discover          # the server, the tool it offers and that tool's input schema
+./scripts/ci/_act_mcp.py plan --workspace "$PWD" --workflow ci.yml --job coverage
+./scripts/git-hooks/install.sh             # opt-in: run post_commit.sh from git after each commit
+./scripts/git-hooks/install.sh --remove    # take it back out
+```
+
+`scripts/ci/_act_mcp.py` is the MCP client and `scripts/ci/_gate_summary.py` is the
+block the run ends with, and both are usable on their own. The client reads the argument
+*names* out of the tool's own `inputSchema` rather than guessing them, prints the
+workspace before it sends anything, and exits `2` when act-mcp cannot be used - which is
+what sends the run back to the gate scripts instead of letting a job that never ran be
+reported as a pass. The summary block takes the reports and logs the runner left behind
+and prints one line per gate plus one overall `result` line, and its exit status becomes
+the run's:
+
+```
+workspace    /abs/fitbit-monitor  (resolved from the working directory)
+runner       direct (scripts/ci/coverage.sh, scripts/ci/bench.sh - the command lines the two jobs are)
+gate         status detail
+lint         PASS
+coverage     PASS   92.0% covered (floor 85.0%)
+benchmarks   PASS   no case regressed more than 15%
+result       PASS   3 passed, 0 failed
+```
+
+Because the reports a container writes stay in the container, a number that was not
+measured here is taken from the job's own log and marked as such (`[job log]`); when
+neither the report nor the log carries one, the row says
+`no coverage number reported` rather than implying a percentage. The hook is opt-in and
+installed by `scripts/git-hooks/install.sh`, which only ever symlinks
+`scripts/git-hooks/post-commit` into `.git/hooks/` and refuses to clobber a hook it did
+not install; a red gate there reports and does not undo the commit (`POST_COMMIT_STRICT=1`
+makes it exit nonzero as well, `POST_COMMIT_SKIP=1` skips once).
+
+One guard is worth knowing about when a test reaches for these scripts:
+`scripts/ci/coverage.sh` runs this repository's test suite, and the suite runs
+`scripts/ci/post_commit.sh`, so a nested run that resolves back to the repository whose
+suite is already running would call the gate that calls the suite forever. coverage.sh
+exports `FITBIT_CI_SUITE` as the root whose suite is live and `post_commit.sh` refuses
+exactly that root, with a `fix:` line; a test points the runner at a stub repository
+instead (`tests/test_ci_post_commit.py` does).
+
 ## What the benchmark gate measures
 
 `scripts/bench/bench_plugin_system.py` builds a synthetic 90-day corpus in a temporary
