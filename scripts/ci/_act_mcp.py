@@ -29,16 +29,30 @@ Exit codes::
 
     0  the tool ran and reported success
     1  the tool ran and reported failure (the job is red - that is a real verdict)
-    2  act-mcp could not be used (no config, no route, no usable tool, no workspace
-       argument in its schema) - the caller falls back to running the gate directly
+    2  act-mcp could not be used (no config, no route, no usable tool, a required
+       argument with no value, a server pointed at somebody else's tree) - the caller
+       falls back to running the gate directly
 
 Two honesty rules. The workspace is never guessed at: ``--workspace`` is required, is
 made absolute, and is checked for ``.github/workflows`` before anything is sent. And
 the argument *names* the server wants are read out of the tool's own ``inputSchema``
 rather than hardcoded, because the server is a separate binary whose parameter names
-this repository does not control - when no workspace-shaped argument exists, this
-prints the tool's schema and exits ``2`` instead of silently dropping the one argument
-that was the whole point.
+this repository does not control.
+
+Which leaves the case the schema cannot answer: a server that *binds* its workspace at
+launch and therefore has no workspace argument at all - act-mcp 0.0.4 is exactly that::
+
+    inputSchema properties: category, commit, idempotency_key, inputs, log_tail_bytes,
+                            secrets, task, timeout_secs, wait, workflow
+
+Dropping the workspace there is not a guess, it is a different tree, so such a server is
+*asked* which tree it owns (the ``instructions`` of its own ``initialize`` answer names
+it) and the call is only made when that is the tree being gated here - see
+:func:`plan_workspace`. A server that owns another checkout exits ``2`` with both paths
+named rather than reporting someone else's build green. The remaining arguments the
+bound server insists on (``task``, ``category``, ``commit``, ``wait``) are derived -
+job id, category hint from ``list_tasks``, ``git rev-parse HEAD``, and "wait for the
+terminal answer" - and the whole argument set is printed before it is sent.
 """
 
 from __future__ import annotations
@@ -47,11 +61,12 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_NAME = "fitbit-monitor-post-commit"
@@ -77,8 +92,35 @@ WORKSPACE_ARGS = (
 )
 
 #: Argument names that mean "run this job" / "this workflow file", best first.
-JOB_ARGS = ("job", "jobid", "jobname", "job_id", "job_name")
+#: ``task`` leads because act-mcp calls the job id that (it is "exactly what ``act -j``
+#: takes"), and a server offering both means act-mcp.
+JOB_ARGS = ("task", "job", "jobid", "jobname", "job_id", "job_name")
 WORKFLOW_ARGS = ("workflow", "workflowfile", "workflow_file", "workflowpath", "file", "name")
+
+#: Optional arguments whose value this client can work out for itself, matched the same
+#: normalised way. Each has a reason to be sent: the category is what makes act-mcp write
+#: an evidence file for the run, the commit ties the run to the checkout being gated,
+#: ``wait`` is what makes one call produce a verdict, and the log tail is what
+#: ``scripts/ci/_gate_summary.py`` reads a number out of when the reports stayed in the
+#: container. Only names the server actually declares are sent.
+CATEGORY_ARGS = ("category",)
+COMMIT_ARGS = ("commit", "commitish", "rev", "sha", "ref")
+WAIT_ARGS = ("wait",)
+RUN_TIMEOUT_ARGS = ("timeout_secs", "timeout_seconds", "timeout")
+LOG_TAIL_ARGS = ("log_tail_bytes", "log_tail")
+
+#: A read-only catalogue of what the server can run, and the per-job category hint.
+LIST_TASKS_TOOL = r"list[_-]?tasks"
+
+#: How much of the job log to ask for. act-mcp 0.0.4 refuses more than 64 KiB, and a
+#: coverage run's summary lines are the last thing it prints, so the ceiling is the right
+#: amount to ask for.
+LOG_TAIL_BYTES = 65_536
+
+#: Run statuses that mean the job did not pass. act-mcp answers a failed workflow as a
+#: normal tool result (`isError` false, `status: "failed"`), so reading only `isError`
+#: would report a red job green.
+FAILED_STATUSES = ("failed", "timed_out", "timeout", "error", "cancelled", "aborted")
 
 #: A tool that runs a workflow, best first.
 TOOL_PREFERENCE = (
@@ -164,6 +206,138 @@ def pick_server(servers: dict[str, Any], wanted: str | None) -> tuple[str, str, 
     return wanted, str(url), timeout
 
 
+# --- a server that owns its own workspace --------------------------------------
+#: How a workspace-bound server says which tree it runs. act-mcp 0.0.4 puts it in the
+#: prose of its ``instructions``: ``... Workspace /abs/fitbit-monitor; evidence root
+#: /abs/fitbit-monitor/.evidence ...``. The separator class is deliberately narrow: it
+#: allows ``Workspace /p``, ``workspace: /p`` and ``workspace=/p``, and nothing else, so
+#: the sentence "One run at a time per workspace and there is no queue" is not mistaken
+#: for a path.
+WORKSPACE_ADVERTISEMENT = re.compile(r"workspace\b[:=]?\s*(/[^\s,;]+)", re.IGNORECASE)
+
+
+def advertised_workspace(init_result: dict[str, Any]) -> Path | None:
+    """The tree a workspace-bound server owns, in its own words - never assumed.
+
+    Read from a machine-readable ``workspace`` field if a future server grows one, else
+    out of the ``instructions`` text. ``None`` means the server never said, which is a
+    different (and worse) answer than "it said somewhere else".
+    """
+    named = init_result.get("workspace") if isinstance(init_result, dict) else None
+    if isinstance(named, str) and named.strip():
+        return Path(named.strip()).expanduser().resolve()
+    match = WORKSPACE_ADVERTISEMENT.search(str(init_result.get("instructions") or ""))
+    return Path(match.group(1)).expanduser().resolve() if match else None
+
+
+class WorkspaceMode(NamedTuple):
+    """How the repository root reaches the server, and one line saying so."""
+
+    argument: str | None
+    note: str
+
+
+def plan_workspace(
+    *,
+    tool: dict[str, Any],
+    client: McpHttp,
+    requested: Path,
+    override: str | None,
+    server_bound: bool,
+) -> WorkspaceMode:
+    """Which argument carries the root - or why none does, and why that is the same tree.
+
+    Three answers, in this order: an explicit ``--workspace-arg`` (an instruction, used
+    whatever the schema says); a workspace-shaped argument in the tool's own schema (the
+    normal case, and the only one that lets one server gate many checkouts); and a
+    workspace-bound server, which is only believed when it names the tree being gated.
+    """
+    if override:
+        return WorkspaceMode(override, f"sent as --{override}, per the caller's override")
+    key = pick_argument(tool, WORKSPACE_ARGS, "workspace", optional=True)
+    if key:
+        return WorkspaceMode(key, f"sent as {key}={requested}")
+    advertised = advertised_workspace(client.init_result)
+    if advertised == requested:
+        return WorkspaceMode(None, f"the server binds its own workspace and it is this one ({requested})")
+    if server_bound:
+        return WorkspaceMode(
+            None,
+            f"the server binds its own workspace{f' ({advertised})' if advertised else ''} and "
+            "--server-bound was passed: the run measures that checkout, not this one",
+        )
+    raise ActMcpError(
+        f"the act-mcp tool {tool.get('name')!r} has no workspace argument, and the server runs "
+        f"{advertised if advertised else 'a workspace it never named'} rather than {requested}\n"
+        f"  fix: start act-mcp against this checkout (act-mcp --workspace {requested}), or pass "
+        "--server-bound to accept a run in the server's own tree, or run the gates directly "
+        "with --via direct"
+    )
+
+
+def head_commit(workspace: Path) -> str | None:
+    """The commit a server that resolves commits locally should be told to run."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    sha = done.stdout.strip()
+    return sha if done.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{7,40}", sha) else None
+
+
+def list_tasks_tool(tools: list[dict[str, Any]]) -> str | None:
+    """The read-only catalogue tool, if this server has one (act-mcp does)."""
+    for tool in tools:
+        name = str(tool.get("name") or "") if isinstance(tool, dict) else ""
+        if name and re.search(LIST_TASKS_TOOL, name.lower()):
+            return name
+    return None
+
+
+def category_hint(client: McpHttp, tool_name: str, *, workflow: str | None, job: str | None) -> str | None:
+    """The server's own hint about what kind of job this is (coverage / benchmark / other).
+
+    ``list_tasks`` is documented as advisory and read-only, so a failure here is not a
+    failure of the run: it returns ``None`` and the caller falls back to reading the hint
+    out of the job's name. Getting it right is worth the call, because the category is
+    what decides whether act-mcp writes an evidence file for the run at all.
+    """
+    try:
+        result = client.call_tool(tool_name, {"workflow": workflow} if workflow else {})
+    except ActMcpError:
+        return None
+    data = result.get("structuredContent")
+    if not isinstance(data, dict):
+        data = _json_from_text(result_text(result))
+    wanted = _workflow_names(workflow) if workflow else set()
+    entries = (data.get("workflows") or []) if isinstance(data, dict) else []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if wanted:
+            spelled = _workflow_names(str(entry.get("name") or "")) | _workflow_names(str(entry.get("file") or ""))
+            if not wanted & spelled:
+                continue
+        for task in entry.get("jobs") or []:
+            if isinstance(task, dict) and (job is None or str(task.get("id")) == job):
+                hint = task.get("category_hint")
+                if isinstance(hint, str) and hint.strip():
+                    return hint.strip()
+    return None
+
+
+def _workflow_names(value: str) -> set[str]:
+    """Every way one workflow file gets spelled: ``ci``, ``ci.yml``, the path, the file."""
+    stem = Path(value).name
+    return {name for name in (stem, Path(stem).stem, value, value.strip("/")) if name}
+
+
 def resolve_workspace(value: str) -> Path:
     """Absolute path that really holds ``.github/workflows``, or an ActMcpError saying so."""
     path = Path(value).expanduser()
@@ -196,6 +370,9 @@ class McpHttp:
         self.session_id: str | None = None
         self.protocol_version = PROTOCOL_VERSION
         self.server_info: dict[str, Any] = {}
+        self.init_result: dict[str, Any] = {}
+        #: filled by connect(): the whole catalogue, so a caller can find list_tasks too
+        self.tools: list[dict[str, Any]] = []
 
     def _request(self, payload: dict[str, Any] | None, *, expect: bool) -> dict[str, Any] | None:
         data = None if payload is None else json.dumps(payload).encode()
@@ -272,6 +449,7 @@ class McpHttp:
         result = result or {}
         self.protocol_version = result.get("protocolVersion") or PROTOCOL_VERSION
         self.server_info = result.get("serverInfo") or {}
+        self.init_result = result
         self._request({"jsonrpc": "2.0", "method": "notifications/initialized"}, expect=False)
         return result
 
@@ -279,7 +457,7 @@ class McpHttp:
         tools: list[dict[str, Any]] = []
         cursor = None
         for _ in range(20):  # a paged catalogue that never ends is a bug we stop reporting
-            params = {"cursor": cursor} if cursor else {}
+            params: dict[str, Any] = {"cursor": cursor} if cursor else {}
             result = self._request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": params}, expect=True)
             page = (result or {}).get("tools") or []
             tools.extend(page)
@@ -355,8 +533,9 @@ def pick_argument(tool: dict[str, Any], candidates: tuple[str, ...], label: str,
         return candidates[0]
     normalised = {_normal(name): name for name in properties}
     for candidate in candidates:
-        if candidate in normalised:
-            return normalised[candidate]
+        key = normalised.get(_normal(candidate))
+        if key:
+            return key
     if optional:
         return None
     raise ValueError(
@@ -367,18 +546,88 @@ def pick_argument(tool: dict[str, Any], candidates: tuple[str, ...], label: str,
     )
 
 
+def _has(arguments: dict[str, Any], name: str) -> bool:
+    """Whether ``arguments`` already carries ``name`` under any spelling of it."""
+    return _normal(name) in {_normal(key) for key in arguments}
+
+
+def derived_values(
+    tool: dict[str, Any],
+    arguments: dict[str, Any],
+    *,
+    client: McpHttp,
+    workspace: Path,
+    category: str | None,
+    commit: str | None,
+) -> None:
+    """Fill the arguments a workspace-bound server insists on but this client can work out.
+
+    Every value is one the caller has already established in another form: the commit is
+    this checkout's HEAD (the server resolves commits locally and never fetches, so this
+    is what pins the run to the code being gated), the category is the server's own hint
+    from ``list_tasks``, and the wait/timeout/log-tail trio is what turns one call into a
+    verdict with a readable log behind it. A required argument this client has no value
+    for stops the run here rather than arriving as a server-side validation error.
+    """
+    schema = tool.get("inputSchema") or {}
+    declared_required = [str(name) for name in (schema.get("required") or [])]
+    required = {_normal(name) for name in declared_required}
+
+    def declare(candidates: tuple[str, ...], label: str, value: Any, *, only_if_required: bool) -> None:
+        """Send one derived argument, if the server declares it and it is not already set."""
+        key = pick_argument(tool, candidates, label, optional=True)
+        if not key or _has(arguments, key) or (only_if_required and _normal(key) not in required):
+            return
+        if value is None:
+            raise ActMcpError(
+                f"the act-mcp tool {tool.get('name')!r} requires {key!r} ({label}) and this client has "
+                f"no value for it\n  fix: pass --arg {key}=VALUE for the tree at {workspace}, or run "
+                "the gates directly with --via direct"
+            )
+        arguments[key] = value
+
+    declare(COMMIT_ARGS, "the commit to run", commit or head_commit(workspace), only_if_required=False)
+    declare(CATEGORY_ARGS, "what kind of job this is", category, only_if_required=False)
+    # Two knobs about the answer this client consumes: `wait` is what makes one call return
+    # a verdict instead of a run id this client would then have to poll, and the log tail
+    # has to be long enough to still hold the coverage line after the suite scrolled past
+    # it. The run's own budget is only sent when insisted on, and is set under this
+    # client's socket timeout so the server reports a timeout rather than this call dying
+    # first and losing sight of a run that goes on without it.
+    declare(WAIT_ARGS, "the terminal answer, not a run id", True, only_if_required=False)
+    declare(LOG_TAIL_ARGS, "how much job log comes back", LOG_TAIL_BYTES, only_if_required=False)
+    declare(
+        RUN_TIMEOUT_ARGS,
+        "the run's own wall-clock budget",
+        max(30, int(client.timeout) - 60),
+        only_if_required=True,
+    )
+    missing = [
+        name
+        for name in sorted(declared_required)
+        if not _has(arguments, name) and pick_argument(tool, (name,), name, optional=True) is not None
+    ]
+    if missing:
+        raise ActMcpError(
+            f"the act-mcp tool {tool.get('name')!r} requires "
+            f"{', '.join(repr(name) for name in missing)}, which this client has no value for\n"
+            "  fix: pass --arg NAME=VALUE for each one (see --help), or run the gates directly "
+            "with --via direct"
+        )
+
+
 def build_arguments(
     tool: dict[str, Any],
     *,
     workspace: Path,
     job: str | None,
     workflow: str | None,
-    workspace_arg: str | None,
+    mode: WorkspaceMode,
     extra: list[str],
 ) -> dict[str, Any]:
     arguments: dict[str, Any] = {}
-    key = workspace_arg or pick_argument(tool, WORKSPACE_ARGS, "workspace", optional=False)
-    arguments[key] = str(workspace)
+    if mode.argument:
+        arguments[mode.argument] = str(workspace)
     if job:
         job_key = pick_argument(tool, JOB_ARGS, "job", optional=True)
         if job_key:
@@ -395,6 +644,25 @@ def build_arguments(
     return arguments
 
 
+def _json_from_text(text: str) -> dict[str, Any]:
+    """The JSON object a tool's text answer is, or contains - if it is or does.
+
+    act-mcp answers a finished run as JSON in a text block and, depending on version,
+    also as ``structuredContent``; reading both means the verdict is found whichever way
+    the server chose to say it.
+    """
+    for candidate in (text, text[text.find("{") : text.rfind("}") + 1] if "{" in text and "}" in text else ""):
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
 def result_text(result: dict[str, Any]) -> str:
     """Every text block a tool result carries, joined - the job log we can read."""
     chunks: list[str] = []
@@ -407,14 +675,64 @@ def result_text(result: dict[str, Any]) -> str:
     return "\n".join(chunks)
 
 
+def run_status(result: dict[str, Any], text: str) -> str | None:
+    """The run's terminal status as the server named it, if it named one."""
+    for source in (result.get("structuredContent"), _json_from_text(text)):
+        if not isinstance(source, dict):
+            continue
+        for holder in (source, source.get("run"), source.get("run_view")):
+            if isinstance(holder, dict):
+                for key in ("status", "state", "run_status"):
+                    value = holder.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip().lower()
+    match = re.search(r"\"(?:status|state)\"\s*:\s*\"([A-Za-z_]+)\"", text)
+    return match.group(1).lower() if match else None
+
+
+def server_busy(result: dict[str, Any], text: str) -> bool:
+    """Whether the server refused for a reason that says nothing about this job.
+
+    act-mcp runs one job per workspace with no queue, so a concurrent run answers
+    ``workspace_busy``. That is an unusable runner right now, not a red gate, and the
+    caller must be able to tell the two apart.
+    """
+    return "workspace_busy" in text or "workspace_busy" in json.dumps(result.get("structuredContent") or {})
+
+
+def refusal_reason(result: dict[str, Any], text: str) -> str | None:
+    """Why the server declined to run the job at all, in its own words - or ``None``.
+
+    A structured ``error`` answer (bad argument, unknown task, unknown commit, busy
+    workspace) is a statement about the *runner*, not about the workflow: the job never
+    started, so it has no verdict and the caller must fall back to the gate scripts rather
+    than report a build that never ran. A workflow that ran and failed answers with a
+    ``status`` instead - that one is a real, red verdict.
+    """
+    if server_busy(result, text):
+        return "workspace_busy: another run already holds that workspace (act-mcp has no queue)"
+    for source in (result.get("structuredContent"), _json_from_text(text)):
+        if isinstance(source, dict) and isinstance(source.get("error"), dict):
+            error = source["error"]
+            code = str(error.get("code") or "error")
+            message = str(error.get("message") or "").strip()
+            return f"{code}: {message}" if message else code
+    match = re.search(r"^\S+:\s*(\w+):\s*argument", text, re.MULTILINE)
+    return f"invalid arguments ({match.group(1)})" if match else None
+
+
 def job_failed(result: dict[str, Any], text: str) -> bool:
     """Whether the tool itself said the job was red.
 
-    ``isError`` is the protocol's own word for it; the markers below are what this
-    repository's gates print, so a server that reports a failed job as a plain text
-    result still fails the run instead of shrugging.
+    ``isError`` is the protocol's own word for it, but it is not enough on its own: a
+    workflow that ran and failed is a *successful* tool call whose payload says
+    ``status: failed``, and reading only ``isError`` would report that build green. The
+    markers below are what this repository's gates print, so even a server that flattens
+    the whole run into a text block fails the run instead of shrugging.
     """
     if result.get("isError"):
+        return True
+    if run_status(result, text) in FAILED_STATUSES:
         return True
     if re.search(r"coverage floor failed", text, re.MULTILINE):
         return True
@@ -437,6 +755,7 @@ def connect(args: argparse.Namespace) -> tuple[McpHttp, dict[str, Any]]:
     client = McpHttp(url, timeout=timeout_seconds(args.timeout, configured_timeout))
     client.initialize()
     tools = client.list_tools()
+    client.tools = tools
     if args.tool:
         tool = next((t for t in tools if isinstance(t, dict) and t.get("name") == args.tool), None)
         if tool is None:
@@ -459,15 +778,32 @@ def connect(args: argparse.Namespace) -> tuple[McpHttp, dict[str, Any]]:
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
+    """What would be used, and whether it can be used here - the runner's go/no-go probe.
+
+    ``scripts/ci/post_commit.sh`` calls this before choosing a runner, so its exit status
+    is the answer to "can act-mcp gate this checkout", and its lines have to say which
+    tree a run would measure.
+    """
     client, tool = connect(args)
     properties = schema_properties(tool)
     print(f"schema:    {', '.join(sorted(properties)) or '(no inputSchema)'}", flush=True)
+    workspace = resolve_workspace(args.workspace or ".")
     try:
-        key = args.workspace_arg or pick_argument(tool, WORKSPACE_ARGS, "workspace", optional=False)
-        print(f"workspace: --{key}", flush=True)
-    except ValueError as exc:
+        mode = plan_workspace(
+            tool=tool,
+            client=client,
+            requested=workspace,
+            override=args.workspace_arg,
+            server_bound=args.server_bound,
+        )
+    except ActMcpError as exc:
         print(f"error:     {exc}", file=sys.stderr, flush=True)
         return UNAVAILABLE
+    print(f"workspace: {mode.note}", flush=True)
+    tasks = list_tasks_tool(client.tools)
+    if tasks:
+        print(f"tasks:     {tasks} (read-only; supplies the category hint)", flush=True)
+    print(f"root:      {workspace}", flush=True)
     return 0
 
 
@@ -497,13 +833,39 @@ def cmd_run(args: argparse.Namespace) -> int:
     workspace = resolve_workspace(args.workspace)
     print(f"workspace: {workspace} (resolved from --workspace)", flush=True)
     client, tool = connect(args)
+    mode = plan_workspace(
+        tool=tool,
+        client=client,
+        requested=workspace,
+        override=args.workspace_arg,
+        server_bound=args.server_bound,
+    )
+    print(f"mode:      {mode.note}", flush=True)
+    commit = args.commit or head_commit(workspace)
+    category = args.category
+    if category is None:
+        tasks = list_tasks_tool(getattr(client, "tools", []))
+        if tasks:
+            category = category_hint(client, tasks, workflow=args.workflow, job=args.job)
+    if category is None and args.job:
+        # No catalogue to ask (or it had no hint): the job's own name is the hint.
+        lowered = args.job.lower()
+        category = "coverage" if "coverage" in lowered else "benchmark" if "bench" in lowered else None
     arguments = build_arguments(
         tool,
         workspace=workspace,
         job=args.job,
         workflow=args.workflow,
-        workspace_arg=args.workspace_arg,
+        mode=mode,
         extra=args.arg,
+    )
+    derived_values(
+        tool,
+        arguments,
+        client=client,
+        workspace=workspace,
+        category=category,
+        commit=commit,
     )
     print(f"call:      tools/call {tool['name']} {json.dumps(arguments, sort_keys=True)}", flush=True)
     result = client.call_tool(str(tool["name"]), arguments)
@@ -512,10 +874,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.log:
         Path(args.log).parent.mkdir(parents=True, exist_ok=True)
         Path(args.log).write_text(text)
+    status = run_status(result, text)
+    # A refusal is checked before a verdict, and only when the run never named a status:
+    # "the job is red" and "the runner would not start the job" are different answers, and
+    # only the second one is allowed to send the caller back to the gate scripts.
+    refused = refusal_reason(result, text) if status is None else None
+    if refused:
+        raise ActMcpError(f"the act-mcp server would not run {args.job or tool['name']!r}: {refused}")
     if job_failed(result, text):
-        print(f"act-mcp:   {args.job or tool['name']} reported a failing job", file=sys.stderr, flush=True)
+        said = f" (status: {status})" if status else ""
+        print(f"act-mcp:   {args.job or tool['name']} reported a failing job{said}", file=sys.stderr, flush=True)
         return 1
-    print(f"act-mcp:   {args.job or tool['name']} reported success", flush=True)
+    print(
+        f"act-mcp:   {args.job or tool['name']} reported success"
+        + (f" (status: {status})" if status else ""),
+        flush=True,
+    )
     return 0
 
 
@@ -532,6 +906,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     discover = sub.add_parser("discover", help="print the server, the tool and its input schema")
     discover.add_argument("--workspace-arg", default=None, help="override the argument that carries the root")
+    discover.add_argument(
+        "--workspace", default=None, help="the checkout to check the server against (default: this one)"
+    )
+    discover.add_argument(
+        "--server-bound",
+        action="store_true",
+        help="accept a server that runs its own checkout, whoever owns it",
+    )
     discover.set_defaults(func=cmd_discover)
 
     plan = sub.add_parser("plan", help="print the tool call that would be made, and make nothing")
@@ -544,8 +926,19 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="run one job and echo the tool's output")
     run.add_argument("--workspace", required=True, help="repository root holding .github/workflows")
     run.add_argument("--workspace-arg", default=None, help="override the argument that carries the root")
+    run.add_argument(
+        "--server-bound",
+        action="store_true",
+        help="send no workspace argument even if the server's own words name another checkout",
+    )
     run.add_argument("--job", default=None, help="job id to run, e.g. coverage")
     run.add_argument("--workflow", default=None, help="workflow file to run it from, e.g. ci.yml")
+    run.add_argument(
+        "--category",
+        default=None,
+        help="what kind of job this is (act-mcp: coverage, benchmark); default: list_tasks' hint",
+    )
+    run.add_argument("--commit", default=None, help="commit the server should resolve; default: this HEAD")
     run.add_argument(
         "--arg", action="append", default=[], metavar="NAME=VALUE", help="extra tool argument; repeatable"
     )

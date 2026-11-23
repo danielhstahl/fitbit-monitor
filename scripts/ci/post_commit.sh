@@ -27,8 +27,10 @@
 # Runner selection (`--via auto`, the default):
 #
 #   1. act-mcp - the MCP server configured in .pi/mcp.json, driven by
-#      scripts/ci/_act_mcp.py, which reads the tool's own inputSchema to find the
-#      argument that carries the workspace;
+#      scripts/ci/_act_mcp.py, which reads the argument names out of the tool's own
+#      inputSchema. A server that binds its workspace at launch - act-mcp 0.0.4, the one
+#      actually configured here - has no such argument, so the client asks the server
+#      which tree it owns and only sends a job when that tree is this checkout;
 #   2. act     - the `act` binary on PATH ($ACT_BIN), run as `act -W "$ROOT" -j <job>
 #      --bind --artifact-server-path <dir>`;
 #   3. direct  - scripts/ci/coverage.sh and scripts/ci/bench.sh, the exact command
@@ -350,7 +352,7 @@ if [[ "$VIA" != "direct" ]]; then
     if "$PYTHON" scripts/ci/_act_mcp.py discover >"$LOG_DIR/act-mcp-discover.log" 2>&1; then
         sed 's/^/  /' "$LOG_DIR/act-mcp-discover.log"
         RUNNER=act-mcp
-        RUNNER_NOTE="act-mcp ($ROOT passed as the workspace, per its own inputSchema)"
+        RUNNER_NOTE="act-mcp (the server in .pi/mcp.json; the tree it runs is the one it named above)"
     else
         sed 's/^/  /' "$LOG_DIR/act-mcp-discover.log"
         if [[ "$VIA" == "act-mcp" && "$FALLBACK" -eq 0 ]]; then

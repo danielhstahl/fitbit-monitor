@@ -82,6 +82,60 @@ The exact invocations, from a clean clone:
 ./scripts/git-hooks/install.sh --remove    # take it back out
 ```
 
+### When the server owns its own workspace
+
+act-mcp binds its workspace when it is started, so its `run_workflow` tool has no
+workspace argument at all - the path is a property of the running server, not of the
+call:
+
+```
+inputSchema properties: category, commit, idempotency_key, inputs, log_tail_bytes, secrets, task, timeout_secs, wait, workflow
+```
+
+So the client asks the server which tree it owns - the `instructions` of the server's own
+`initialize` answer name it - and only sends a run when that is the checkout being
+gated. `discover` prints the answer, and its exit status is what `post_commit.sh` uses to
+choose the runner:
+
+```bash
+$ ./scripts/ci/_act_mcp.py discover
+server:    act-mcp (act-mcp) at http://host.docker.internal:60562/mcp
+tool:      run_workflow
+schema:    category, commit, idempotency_key, inputs, log_tail_bytes, secrets, task, timeout_secs, wait, workflow
+error:     the act-mcp tool 'run_workflow' has no workspace argument, and the server runs /Users/you/fitbit-monitor rather than /workspace
+  fix: start act-mcp against this checkout (act-mcp --workspace /workspace), or pass --server-bound ...
+```
+
+A build of somebody else's checkout is not this repository's gate, so running in the
+server's own tree has to be asked for by name with `--server-bound`; the summary line then
+says so out loud (`the run measures that checkout, not this one`).
+
+When the server does own this checkout, the remaining arguments it insists on are derived
+and printed before they are sent:
+
+```bash
+$ ./scripts/ci/_act_mcp.py run --workspace "$PWD" --workflow ci.yml --job coverage
+call:      tools/call run_workflow {"category": "coverage", "commit": "58b3df1", "log_tail_bytes": 65536, "task": "coverage", "wait": true, "workflow": "ci.yml"}
+```
+
+* `task` is act-mcp's name for the job id - exactly what `act -j` takes.
+* `category` comes from the read-only `list_tasks` tool (the coverage job's hint is
+  `coverage`, the benchmark job's is `benchmark`), because the category is what decides
+  whether act-mcp keeps any evidence from the run at all.
+* `commit` is this checkout's `HEAD`, because act-mcp resolves commits locally and never
+  fetches: that is what ties the run to the code being gated. A server that cannot run
+  that commit in its own tree - a dirty worktree answers `isolation_failed` - is an
+  unusable runner, not a red gate.
+* `wait` and `log_tail_bytes` are what turn one call into a verdict with a readable log
+  behind it, so the summary block can still print a coverage percentage when the reports
+  stayed inside the container.
+
+Three answers are then kept apart, because collapsing them would be the interesting bug:
+`0` green, `1` red - including a payload that says `"status": "failed"` while the tool
+call itself succeeded, which `isError` alone would have called green - and `2` for "the
+runner would not start the job" (`invalid_arguments`, `workspace_busy`,
+`isolation_failed`), which is no verdict at all and sends the gate back to the scripts.
+
 `scripts/ci/_act_mcp.py` is the MCP client and `scripts/ci/_gate_summary.py` is the
 block the run ends with, and both are usable on their own. The client reads the argument
 *names* out of the tool's own `inputSchema` rather than guessing them, prints the

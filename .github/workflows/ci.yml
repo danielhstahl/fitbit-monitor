@@ -1,7 +1,7 @@
 name: CI
 
 # One job per concern that the repository promises to keep green: this one runs the
-# tests and fails under the coverage floor; `benchmark.yml` owns the perf gate.
+# tests and fails under the coverage floor; `bench.yml` owns the perf gate.
 # Both delegate to scripts/ci/*.sh so a laptop and the runner agree, and neither
 # carries a command line, a version number or a floor of its own.
 #

@@ -265,7 +265,10 @@ repository root itself and runs the lint, coverage and benchmark jobs through th
 runner it finds - `act-mcp` (configured in `.pi/mcp.json`), then `act`, then the gate
 scripts directly - and ends with one PASS/FAIL block carrying the coverage percentage
 and the benchmark verdict. See [docs/ci.md](docs/ci.md#after-every-commit-act-mcp-then-act-then-the-scripts)
-for the exact act-mcp invocation and which workflows are act-safe.
+for the exact act-mcp invocation and which workflows are act-safe. One wrinkle that lives
+there rather than here: act-mcp binds its workspace when it is started and its tool then
+has no workspace argument, so the client asks the server which tree it owns and only
+sends a job when that tree is this checkout - otherwise the gates run directly.
 
 **Without uv**, `pip` installs the same toolchain - `uv sync --extra dev` is the fast
 path and `uv.lock` is the pin, but nothing in the repository depends on uv being

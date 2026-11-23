@@ -97,19 +97,15 @@ class StubMcpHandler(http.server.BaseHTTPRequestHandler):
         method = message.get("method")
         request_id = message.get("id")
         if method == "initialize":
-            self._send(
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": {
-                            "protocolVersion": "2025-06-18",
-                            "serverInfo": {"name": "act-mcp", "version": "stub"},
-                            "capabilities": {"tools": {}},
-                        },
-                    }
-                )
-            )
+            result: dict[str, Any] = {
+                "protocolVersion": "2025-06-18",
+                "serverInfo": {"name": "act-mcp", "version": "stub"},
+                "capabilities": {"tools": {}},
+            }
+            instructions = getattr(server, "instructions", "")
+            if instructions:
+                result["instructions"] = instructions
+            self._send(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}))
         elif method == "notifications/initialized":
             self._send("", status=202)
         elif method == "tools/list":
@@ -117,10 +113,15 @@ class StubMcpHandler(http.server.BaseHTTPRequestHandler):
         elif method == "tools/call":
             params = message.get("params") or {}
             server.calls.append(params)
-            result: dict[str, Any] = {
-                "content": [{"type": "text", "text": server.job_output}],
-                "isError": server.job_is_error,
-            }
+            named = getattr(server, "tool_results", {}).get(str(params.get("name")))
+            result = (
+                named
+                if named is not None
+                else {
+                    "content": [{"type": "text", "text": server.job_output}],
+                    "isError": server.job_is_error,
+                }
+            )
             payload = json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result})
             self._send(payload, sse=getattr(server, "sse", False))
         else:
@@ -132,13 +133,29 @@ class StubMcpHandler(http.server.BaseHTTPRequestHandler):
 
 
 class StubMcpServer:
-    """A real socket on localhost, so the transport the client uses is the thing under test."""
+    """A real socket on localhost, so the transport the client uses is the thing under test.
 
-    def __init__(self, tools: list[dict[str, Any]], job_output: str = "", *, sse: bool = False) -> None:
+    ``instructions`` is what a server's ``initialize`` answer says about itself - which is
+    how a workspace-bound server (one with no workspace argument at all) is asked which
+    tree it runs. ``tool_results`` answers particular tools specially, so a stub can play
+    the part of act-mcp's read-only ``list_tasks`` alongside ``run_workflow``.
+    """
+
+    def __init__(
+        self,
+        tools: list[dict[str, Any]],
+        job_output: str = "",
+        *,
+        sse: bool = False,
+        instructions: str = "",
+        tool_results: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StubMcpHandler)
         self.server.tools = tools
         self.server.job_output = job_output
         self.server.job_is_error = False
+        self.server.instructions = instructions
+        self.server.tool_results = tool_results or {}
         self.server.calls: list[dict[str, Any]] = []
         self.server.sessions: list[str | None] = []
         self.server.sse = sse
@@ -173,12 +190,78 @@ RUN_WORKFLOW_TOOL = {
     },
 }
 
-#: A server whose tool cannot be told which repository to run - the case the client must
-#: refuse instead of silently dropping the one argument that was the whole point.
+#: A server whose tool cannot be told which repository to run, and never says which one it
+#: runs either - the case the client must refuse instead of guessing.
 NO_WORKSPACE_TOOL = {
     "name": "run_workflow",
     "inputSchema": {"type": "object", "properties": {"job": {"type": "string"}, "workflow": {"type": "string"}}},
 }
+
+#: act-mcp 0.0.4, transcribed: it binds its workspace when the server is started, so the
+#: tool has no workspace argument at all, calls the job `task`, and insists on a category
+#: and a commit besides. A client that cannot cope with this shape never uses the runner.
+ACT_MCP_004_TOOL = {
+    "name": "run_workflow",
+    "description": "Run one job of a workflow in this server's workspace with act",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "category": {"type": "string"},
+            "commit": {"type": "string"},
+            "idempotency_key": {"type": "string"},
+            "inputs": {"type": "object"},
+            "log_tail_bytes": {"type": "integer"},
+            "secrets": {"type": "object"},
+            "task": {"type": "string"},
+            "timeout_secs": {"type": "integer"},
+            "wait": {"type": "boolean"},
+            "workflow": {"type": "string"},
+        },
+        "required": ["workflow", "task", "category", "commit"],
+    },
+}
+
+#: act-mcp's own words about the tree it owns, in the shape the real server uses.
+SERVER_WORKSPACE_INSTRUCTIONS = (
+    "act-mcp 0.0.4 - runs one job of one GitHub Actions workflow with act. "
+    "Workspace {root}; evidence root {root}/.evidence (every path a tool returns is "
+    "relative to it). One run at a time per workspace and there is no queue: a second "
+    "call answers `workspace_busy` naming the run in flight."
+)
+
+
+def list_tasks_stub(hint: str = "coverage") -> dict[str, Any]:
+    """The read-only catalogue, shaped like act-mcp's: jobs, ids and category hints."""
+    return {
+        "content": [{"type": "text", "text": "{}"}],
+        "structuredContent": {
+            "workflows": [
+                {
+                    "name": "ci",
+                    "file": ".github/workflows/ci.yml",
+                    "jobs": [
+                        {"id": "lint", "category_hint": "other"},
+                        {"id": "coverage", "category_hint": hint},
+                    ],
+                },
+                {
+                    "name": "bench",
+                    "file": ".github/workflows/bench.yml",
+                    "jobs": [{"id": "benchmark", "category_hint": "benchmark"}],
+                },
+            ]
+        },
+    }
+
+
+def tool_error(code: str, message: str) -> dict[str, Any]:
+    """A refusal that is about the runner, not the workflow: no run, no verdict."""
+    return {
+        "content": [{"type": "text", "text": f"run_workflow: {code}: {message}"}],
+        "structuredContent": {"error": {"code": code, "message": message, "retryable": False}},
+        "isError": False,
+    }
+
 
 COVERAGE_JOB_LOG = "\n".join(
     [
@@ -647,6 +730,213 @@ class ActMcpClientTest(unittest.TestCase):
         self.assertIn("cannot reach", result.stderr)
 
 
+def act_client(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run scripts/ci/_act_mcp.py as a subprocess, with a short per-request timeout."""
+    return subprocess.run(
+        [sys.executable, str(ACT_MCP), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=dict(os.environ, ACT_MCP_TIMEOUT="5"),
+    )
+
+
+def git_init(root: Path) -> str:
+    """Make a stub repository a git checkout, and return the HEAD a run would be told."""
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "here"],
+    ):
+        subprocess.run(command, cwd=str(root), capture_output=True, text=True, check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(root), capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+class WorkspaceBoundServerTest(unittest.TestCase):
+    """The server shape actually configured here: act-mcp 0.0.4, workspace bound at launch.
+
+    Its `run_workflow` has no workspace argument, calls the job `task`, and requires a
+    category and a commit besides - so the client has to answer three questions the schema
+    cannot: which tree this server runs, what kind of job this is, and which commit to
+    resolve. And it has to keep three answers apart: green, red, and "the runner would not
+    start the job", which is neither.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = make_repo(Path(tempfile.mkdtemp()))
+        self.head = git_init(self.tmp)
+
+    def instructions(self, root: Path) -> str:
+        return SERVER_WORKSPACE_INSTRUCTIONS.format(root=root)
+
+    def server(self, *, root: Path | None = None, **kwargs: Any) -> StubMcpServer:
+        return StubMcpServer(
+            [ACT_MCP_004_TOOL], instructions=self.instructions(root or self.tmp), **kwargs
+        )
+
+    def test_discover_accepts_the_server_that_owns_this_checkout(self) -> None:
+        with self.server() as server:
+            result = act_client("--url", server.url, "discover", "--workspace", str(self.tmp))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("binds its own workspace and it is this one", result.stdout)
+        self.assertNotIn("no workspace argument", result.stdout + result.stderr)
+
+    def test_the_call_sent_names_the_job_the_category_and_the_commit_and_no_workspace(self) -> None:
+        catalogue = StubMcpServer(
+            [ACT_MCP_004_TOOL, {"name": "list_tasks", "inputSchema": {"type": "object"}}],
+            instructions=self.instructions(self.tmp),
+            tool_results={"list_tasks": list_tasks_stub()},
+            job_output=COVERAGE_JOB_LOG,
+        )
+        with catalogue:
+            result = act_client(
+                "--url",
+                catalogue.url,
+                "run",
+                "--workspace",
+                str(self.tmp),
+                "--workflow",
+                "ci.yml",
+                "--job",
+                "coverage",
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("coverage: 92.0%", result.stdout)
+        sent = [call["arguments"] for call in catalogue.server.calls if call["name"] == "run_workflow"]
+        self.assertEqual(len(sent), 1)
+        arguments = sent[0]
+        self.assertEqual(arguments["task"], "coverage", "the job id goes under the server's own name for it")
+        self.assertEqual(arguments["workflow"], "ci.yml")
+        self.assertEqual(arguments["commit"], self.head, "the commit is this checkout's HEAD")
+        self.assertEqual(arguments["category"], "coverage", "the category came from list_tasks")
+        self.assertIs(arguments["wait"], True, "one call has to return a verdict, not a run id")
+        self.assertNotIn("workspace", arguments, "a bound server is not sent a path it has no key for")
+
+    def test_a_server_that_owns_a_different_checkout_is_refused_and_names_both_trees(self) -> None:
+        elsewhere = make_repo(Path(tempfile.mkdtemp()))
+        with self.server(root=elsewhere) as server:
+            refused = act_client(
+                "--url", server.url, "run", "--workspace", str(self.tmp), "--workflow", "ci.yml", "--job", "coverage"
+            )
+            self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+            self.assertIn("fix:", refused.stderr)
+            self.assertIn(str(elsewhere), refused.stderr, "the tree the server would have run")
+            self.assertIn(str(self.tmp), refused.stderr, "the tree being gated")
+            self.assertEqual(server.server.calls, [], "refusing must not send a run at all")
+
+            chosen = act_client(
+                "--url",
+                server.url,
+                "run",
+                "--workspace",
+                str(self.tmp),
+                "--workflow",
+                "ci.yml",
+                "--job",
+                "coverage",
+                "--server-bound",
+            )
+        self.assertEqual(chosen.returncode, 0, chosen.stdout + chosen.stderr)
+        self.assertIn("the run measures that checkout, not this one", chosen.stdout)
+        self.assertIn(str(elsewhere), chosen.stdout)
+
+    def test_the_category_hint_comes_from_the_server_and_not_from_the_job_name(self) -> None:
+        catalogue = StubMcpServer(
+            [ACT_MCP_004_TOOL, {"name": "list_tasks", "inputSchema": {"type": "object"}}],
+            instructions=self.instructions(self.tmp),
+            tool_results={"list_tasks": list_tasks_stub(hint="perf")},
+        )
+        with catalogue:
+            result = act_client(
+                "--url",
+                catalogue.url,
+                "run",
+                "--workspace",
+                str(self.tmp),
+                "--workflow",
+                "ci.yml",
+                "--job",
+                "coverage",
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sent = [c["arguments"] for c in catalogue.server.calls if c["name"] == "run_workflow"][0]
+        self.assertEqual(sent["category"], "perf", "the server's hint wins over guessing from the name")
+
+    def test_a_failed_run_is_reported_as_a_red_job_even_when_the_tool_call_succeeded(self) -> None:
+        # act-mcp answers a workflow that ran and failed as an ordinary tool result: the
+        # only word for "red" is inside the payload.
+        with self.server(job_output=json.dumps({"run_id": "r1", "status": "failed", "exit_code": 1})) as server:
+            result = act_client(
+                "--url",
+                server.url,
+                "run",
+                "--workspace",
+                str(self.tmp),
+                "--workflow",
+                "ci.yml",
+                "--job",
+                "coverage",
+            )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("status: failed", result.stderr)
+
+    def test_a_refusal_about_the_runner_is_not_reported_as_a_verdict(self) -> None:
+        for code in ("invalid_arguments", "workspace_busy"):
+            with self.subTest(code=code), self.server(
+                tool_results={"run_workflow": tool_error(code, "this runner cannot do that right now")}
+            ) as server:
+                result = act_client(
+                    "--url",
+                    server.url,
+                    "run",
+                    "--workspace",
+                    str(self.tmp),
+                    "--workflow",
+                    "ci.yml",
+                    "--job",
+                    "coverage",
+                )
+            self.assertEqual(result.returncode, 2, f"{code} must fall back, not fail the gate")
+            self.assertIn(code, result.stderr)
+            self.assertNotIn("reported a failing job", result.stderr)
+
+    def test_a_required_argument_this_client_cannot_derive_stops_before_the_call(self) -> None:
+        tool = {
+            "name": "run_workflow",
+            "inputSchema": {
+                "properties": {"task": {"type": "string"}, "needs_a_token": {"type": "string"}},
+                "required": ["task", "needs_a_token"],
+            },
+        }
+        with StubMcpServer([tool], instructions=self.instructions(self.tmp)) as server:
+            result = act_client("--url", server.url, "run", "--workspace", str(self.tmp), "--job", "coverage")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("needs_a_token", result.stderr)
+        self.assertIn("--arg", result.stderr)
+        self.assertEqual(server.server.calls, [])
+
+    def test_post_commit_runs_both_gates_through_a_workspace_bound_server(self) -> None:
+        catalogue = [
+            ACT_MCP_004_TOOL,
+            {"name": "list_tasks", "inputSchema": {"type": "object"}},
+        ]
+        with StubMcpServer(
+            catalogue,
+            instructions=self.instructions(self.tmp),
+            tool_results={"list_tasks": list_tasks_stub()},
+            job_output=COVERAGE_JOB_LOG + "\n" + BENCH_JOB_LOG,
+        ) as server:
+            result = run(POST_COMMIT, cwd=self.tmp, env={"ACT_MCP_URL": server.url})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("runner:    act-mcp", result.stdout)
+        tasks = sorted(c["arguments"].get("task") for c in server.server.calls if c["name"] == "run_workflow")
+        self.assertEqual(tasks, ["benchmark", "coverage", "lint"])
+        self.assertRegex(result.stdout, r"coverage\s+PASS\s+92\.0% covered")
+        self.assertRegex(result.stdout, r"benchmarks\s+PASS\s+no case regressed more than 15%")
+        self.assertRegex(result.stdout, r"result\s+PASS\s+3 passed, 0 failed")
+
+
 class PostCommitRunTest(unittest.TestCase):
     """The runner end to end, against stub gates and a stub MCP server."""
 
@@ -828,6 +1118,17 @@ class DocumentedTest(unittest.TestCase):
         for workflow in ("ci.yml", "bench.yml"):
             self.assertIn(workflow, self.doc)
         self.assertRegex(self.doc.lower(), r"act-safe")
+
+    def test_ci_doc_explains_that_the_server_may_own_its_own_workspace(self) -> None:
+        """act-mcp binds its workspace at launch, and the doc has to say what follows.
+
+        The escape hatch (`--server-bound`), the derived commit, and the difference between
+        a red job and a runner that would not start are all things a reader can only learn
+        from this file - the tool's own schema does not mention any of them.
+        """
+        self.assertIn("--server-bound", self.doc)
+        self.assertIn("list_tasks", self.doc)
+        self.assertIn("isolation_failed", self.doc)
 
     def test_ci_doc_names_the_two_helpers_it_tells_you_to_run(self) -> None:
         self.assertIn("scripts/ci/_act_mcp.py", self.doc)
