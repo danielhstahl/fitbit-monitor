@@ -387,6 +387,75 @@ class TestExerciseAttribution(EngineRunTestCase):
         self.assertIn("exercise span", notes[0].reason)
 
 
+class TestExerciseAttributionAcrossTwoSpans(EngineRunTestCase):
+    """Two workouts in one day are two attributions - not one unreportable megafinding.
+
+    The day's masked readings are the concatenation of every span the exercise mask took out,
+    and thresholding that concatenation as one stretch lets the centred smoother average the
+    last reading of the first span with the first reading of the second: the "episode" then
+    spans the quiet hours between them, its coverage collapses, and it fails the coverage gate
+    - which in the engine's attribution pass meant it was dropped silently, so a wearer could
+    have a sustained elevation set aside by the mask and the run would report neither a
+    finding nor a suppression. One probe per contiguous stretch, split at the engine's own
+    merge gap, and both attributions appear.
+    """
+
+    episodes = [(2, (9.0, 10.0, 150.0)), (2, (13.0, 14.0, 150.0))]
+    #: The corpus's grain, and the one this bug needs: at a 1-minute grain the mask's cooldown
+    #: leaves enough quiet readings between the spans to break the smoothed run on its own.
+    step_minutes = 5
+
+    def attributed(self):
+        return [
+            episode
+            for episode in self.result.suppressed
+            if episode.type == FINDING_SUSTAINED_HIGH and "activity" in episode.reason
+        ]
+
+    def test_each_exercise_span_is_attributed_on_its_own(self) -> None:
+        self.assertEqual(self.findings_of(FINDING_SUSTAINED_HIGH), [])
+        held = self.attributed()
+        self.assertEqual(len(held), 2, [episode.as_dict() for episode in self.result.suppressed])
+        for episode in held:
+            # Each stretch is measured on its own hour, not on the five hours between the
+            # first reading of one and the last of the other.
+            self.assertLessEqual(episode.duration_minutes, 70.0)
+            self.assertGreaterEqual(episode.detail["coverage"], AnomalyConfig().min_coverage)
+
+    def test_the_note_counts_both_stretches(self) -> None:
+        notes = [note for note in self.result.notes if "activity" in note.reason]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("2 sustained stretch", notes[0].reason)
+
+    def test_the_split_is_at_the_merge_gap_and_nowhere_else(self) -> None:
+        """The unit the fix is: contiguous means next to each other in time, not adjacent in a list."""
+        from datetime import UTC, datetime
+
+        from fitbit_monitor.anomaly.engine import _contiguous_runs
+        from fitbit_monitor.hr.epochs import Sample
+
+        base = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+
+        def stamps(minutes):
+            return tuple(Sample(base + timedelta(minutes=m), 140.0) for m in minutes)
+
+        one_run = _contiguous_runs(
+            stamps([0, 5, 10, 15, 20]), epoch_seconds=300.0, merge_gap_minutes=20.0
+        )
+        self.assertEqual([len(run) for run in one_run], [5])
+        two_runs = _contiguous_runs(
+            stamps([0, 5, 10, 60, 65, 70]), epoch_seconds=300.0, merge_gap_minutes=20.0
+        )
+        self.assertEqual([len(run) for run in two_runs], [3, 3])
+        # A gap shorter than the merge gap stays one stretch: the rule's own merge would call
+        # it one episode, and splitting it here would only make the probe myopic.
+        still_one = _contiguous_runs(
+            stamps([0, 5, 10, 25, 30]), epoch_seconds=300.0, merge_gap_minutes=20.0
+        )
+        self.assertEqual([len(run) for run in still_one], [5])
+        self.assertEqual(_contiguous_runs((), epoch_seconds=300.0, merge_gap_minutes=20.0), [])
+
+
 class TestEvidenceQuality(EngineRunTestCase):
     """A stretch that is mostly a hole in the data is not a finding."""
 

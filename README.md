@@ -170,6 +170,8 @@ types; `scripts/ci/*` is the gate underneath it, which the workflows call with
 ./scripts/dev/check.sh          # all three - what CI runs after every commit
 ./scripts/dev/docs.sh           # regenerate the API reference block in docs/plugins.md
 python scripts/dev/record_fixtures.py --check   # recorded API fixtures are current
+python scripts/dev/record_accuracy_fixtures.py --check  # labelled accuracy fixture is current
+fm dev accuracy --wearers 1     # the detector's confusion matrix and accuracy floors, printed
 ```
 
 The gates underneath take the same arguments and are safe to call directly - and they

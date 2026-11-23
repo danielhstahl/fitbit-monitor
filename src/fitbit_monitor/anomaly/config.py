@@ -162,11 +162,20 @@ class AnomalyConfig:
     #: findings from ordinary daytime wander of the epoch-to-epoch interval, and lifting the bar
     #: cost nothing on the labelled irregular episodes.
     irregularity_z: float = 4.0
-    #: Absolute floor on the index: ``mean |Δinterval| / median interval`` of 0.15 means
-    #: the epoch-to-epoch interval moves by 15% of itself on average. Measured over the
+    #: Absolute floor on the index: ``mean |Δinterval| / median interval`` of 0.20 means
+    #: the epoch-to-epoch interval moves by 20% of itself on average. Measured over the
     #: corpus's quiet windows the ordinary value is around 0.03-0.06, so the floor sits
     #: clear of it and a wearer whose MAD is near zero still cannot fire on jitter.
-    irregularity_floor: float = 0.15
+    #:
+    #: This one was set by the labelled accuracy gate rather than by taste
+    #: (``tests/fixtures/anomaly/hr_anomaly_labels.json``, scored by
+    #: ``tests/test_anomaly_accuracy_gate.py``, written up in ``docs/detection.md``): at 0.15
+    #: the labelled wearers produced scatter findings that matched no labelled episode - all
+    #: of them the onset of an inferred workout, all of them under 0.55 confidence; at 0.18
+    #: every one of them was gone and every labelled irregular episode was still found; at
+    #: 0.25 the first labelled episode started being missed. 0.20 sits inside that window with
+    #: room on both sides.
+    irregularity_floor: float = 0.20
     #: Floor on the scatter index's own scale, so a MAD of zero cannot divide.
     min_spread_index: float = 0.01
 

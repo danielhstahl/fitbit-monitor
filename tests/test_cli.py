@@ -133,6 +133,26 @@ class SeedAndInfoTest(CliTestCase):
         _, text = self.fm("--version", expect=0)
         self.assertIn("fitbit-monitor", text)
 
+
+class DevAccuracyTest(CliTestCase):
+    """`fm dev accuracy` is the gate's printer: the matrix, and a code that means something."""
+
+    def test_it_prints_the_confusion_matrix_and_passes(self) -> None:
+        code, text = self.fm("dev", "accuracy", "--wearers", "1", expect=0)
+        self.assertIn("confusion matrix", text)
+        self.assertIn("clean night windows", text)
+        self.assertIn("accuracy gate: passed", text)
+
+    def test_json_carries_the_report_and_the_floors(self) -> None:
+        _, text = self.fm("dev", "accuracy", "--wearers", "1", "--json", expect=0)
+        payload = json.loads(text)
+        self.assertEqual(payload["clean_window_rate_false_positives"], 0)
+        self.assertEqual(payload["floors_failed"], [])
+        self.assertIn("precision", payload)
+
+    def test_a_fixture_that_is_not_there_is_a_usage_error(self) -> None:
+        self.fm("dev", "accuracy", "--fixture", str(self.store_path.parent / "nope.json"), expect=2)
+
     def test_no_arguments_prints_help(self) -> None:
         code, text = self.fm()
         self.assertEqual(code, 2)

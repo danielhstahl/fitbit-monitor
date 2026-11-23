@@ -14,6 +14,7 @@ says what a finding *means*, in words, to a person). Read it in this order::
     fitbit_monitor.anomaly.rules     the three rules, and the statistics they stand on
     fitbit_monitor.anomaly.engine    the pipeline: read, baseline, rules, merge, gate, score
     fitbit_monitor.anomaly.models    findings, suppressed candidates, run summary
+    fitbit_monitor.anomaly.accuracy  labelled fixtures, the scorer, the floors it must clear
     fitbit_monitor.anomaly.errors    the two ways this package says "no"
 
 Typical use, in one block::
@@ -72,14 +73,30 @@ No store writes, no clock reads, no alert delivery and no notification state: fi
 a stable ``dedup_key`` and an ``occurred_at`` and let the Epic 5 sinks
 (:mod:`fitbit_monitor.plugins.sinks`, :mod:`fitbit_monitor.store.alerts`) do the dedup and
 cooldown they already do properly. No plugin class, no CLI and no user-facing wording; the
-hr-anomaly plugin (this epic's next ticket) is the thin layer that adds exactly those, and
-the labelled accuracy gate after it is where the defaults in
-:mod:`fitbit_monitor.anomaly.config` get justified with a confusion matrix instead of an
-argument.
+hr-anomaly plugin is the thin layer that adds exactly those, and the labelled accuracy gate
+(:mod:`fitbit_monitor.anomaly.accuracy`, scored on every CI run by
+``tests/test_anomaly_accuracy_gate.py``) is where the defaults in
+:mod:`fitbit_monitor.anomaly.config` are justified with a confusion matrix instead of an
+argument - and where a threshold change that quietly wrecks accuracy fails the build.
 """
 
 from __future__ import annotations
 
+from .accuracy import (
+    SHIPPED_FLOORS,
+    VERDICT_ALERT,
+    VERDICT_CLEAR,
+    VERDICT_HELD,
+    AccuracyFloors,
+    AccuracyReport,
+    EpisodeLabel,
+    LabelledCorpus,
+    LabelledSuite,
+    WindowLabel,
+    format_report,
+    label_dev_seed,
+    score_suite,
+)
 from .baseline import (
     MAD_TO_SIGMA,
     RateBaseline,
@@ -129,6 +146,19 @@ from .rules import (
 
 __all__ = [
     "CONTEXTS",
+    "SHIPPED_FLOORS",
+    "VERDICT_ALERT",
+    "VERDICT_CLEAR",
+    "VERDICT_HELD",
+    "AccuracyFloors",
+    "AccuracyReport",
+    "EpisodeLabel",
+    "LabelledCorpus",
+    "LabelledSuite",
+    "WindowLabel",
+    "format_report",
+    "label_dev_seed",
+    "score_suite",
     "DIRECTION_HIGH",
     "DIRECTION_LOW",
     "FINDING_IRREGULAR",

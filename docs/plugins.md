@@ -542,6 +542,12 @@ turns the findings into alerts the host delivers through the sinks above. The en
 produces a measurement with no claim in it; this plugin is where the claim gets made,
 which is exactly why it lives in a plugin.
 
+Every threshold it advertises is the engine's own, and every one of them is scored against
+labelled data on each CI run - the fixture, the verdicts it asserts and the floors the
+detector is held to are in
+[docs/detection.md](detection.md#the-accuracy-gate-measured-on-labelled-data), and
+`fm dev accuracy` prints the confusion matrix.
+
 ```console
 $ fm plugins show hr-anomaly
 hr-anomaly 0.1.0
@@ -570,7 +576,7 @@ ran 1 plugin(s) over 2026-11-03T16:40:34+00:00 .. 2026-11-23T16:40:34+00:00
       hr_anomaly_findings = 1 findings
       hr_anomaly_alerts = 1 alerts
       hr_anomaly_suppressed = 11 episodes
-      [CRITICAL] hr-anomaly: Beat-to-beat intervals were unusually uneven for 170 min (confidence 0.92) @ 2026-11-16 04:45 UTC /     Your beat-to-beat interval was far more uneven than your own ordinary unevenness for 2026-11-16 04:45 to 07:35 UTC while you were at rest (170 min, 21 readings, 97% of that span actually recorded): the scatter index reached 0.81 against your usual 0.06, past a bar of 0.15 (31.2 times your usual spread). Confidence 0.92 says how far those readings sat from your own ordinary spread and how complete the recording was (the personal baseline behind it is 21 days of data) - it is not a probability that anything is wrong, and it is not comparable between people. This is a heuristic pattern in your own recorded data, not a diagnosis and not medical advice: a wrist-worn consumer sensor can see what your rate did, it cannot tell you what caused it or what it means. To check it yourself: fm store export --dataset heart_rate --since 2026-11-16T04:35:00+00:00 --until 2026-11-16T07:45:00+00:00 --format csv prints the readings behind this window, and `fm alerts list --plugin hr-anomaly` lists every episode already flagged.
+      [CRITICAL] hr-anomaly: Beat-to-beat intervals were unusually uneven for 170 min (confidence 0.92) @ 2026-11-16 04:45 UTC /     Your beat-to-beat interval was far more uneven than your own ordinary unevenness for 2026-11-16 04:45 to 07:35 UTC while you were at rest (170 min, 21 readings, 97% of that span actually recorded): the scatter index reached 0.81 against your usual 0.06, past a bar of 0.20 (31.2 times your usual spread). Confidence 0.92 says how far those readings sat from your own ordinary spread and how complete the recording was (the personal baseline behind it is 21 days of data) - it is not a probability that anything is wrong, and it is not comparable between people. This is a heuristic pattern in your own recorded data, not a diagnosis and not medical advice: a wrist-worn consumer sensor can see what your rate did, it cannot tell you what caused it or what it means. To check it yourself: fm store export --dataset heart_rate --since 2026-11-16T04:35:00+00:00 --until 2026-11-16T07:45:00+00:00 --format csv prints the readings behind this window, and `fm alerts list --plugin hr-anomaly` lists every episode already flagged.
 summary: 1 ok; exit 0
 ```
 

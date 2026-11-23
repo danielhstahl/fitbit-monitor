@@ -92,7 +92,7 @@ from datetime import datetime, timedelta
 from typing import Sequence
 
 from ..hr.daily import DayFeatures, FeatureOptions, day_features, day_window
-from ..hr.epochs import EpochSeries, epoch_series
+from ..hr.epochs import EpochSeries, Sample, epoch_series
 from ..hr.util import day_sequence, local_date
 from ..store.reader import ReadOnlyStore
 from ..timeutil import resolve_timezone
@@ -138,6 +138,32 @@ class Reference:
     def required_excess(self) -> float:
         """How far past the level the threshold itself was: the bar an episode had to clear."""
         return abs(self.threshold - self.level)
+
+
+def _contiguous_runs(
+    samples: Sequence[Sample], *, epoch_seconds: float, merge_gap_minutes: float
+) -> list[tuple[Sample, ...]]:
+    """Split masked readings into stretches that are actually next to each other in time.
+
+    A day's exercise overlap is the concatenation of every span the mask took out of it, and
+    those spans are usually hours apart. Thresholding the concatenation as though it were one
+    stretch is wrong twice over: the centred smoother averages the last reading of one span
+    with the first reading of the next and so *bridges* the hole, and the resulting
+    "episode" then claims most of the day, fails its own coverage gate, and is dropped -
+    which is how a 75-minute sustained elevation inside a workout-shaped span vanished from
+    a run's output without a finding, without a suppression and without a word. One probe
+    per stretch, and the split is at the engine's own definition of "two stretches rather
+    than one": further apart than ``merge_gap_minutes``.
+    """
+    limit = max(float(epoch_seconds) * 2.0, float(merge_gap_minutes) * 60.0)
+    runs: list[list[Sample]] = []
+    previous: datetime | None = None
+    for sample in samples:
+        if previous is not None and (sample.ts - previous).total_seconds() > limit:
+            runs.append([])
+        runs[-1].append(sample) if runs else runs.append([sample])
+        previous = sample.ts
+    return [tuple(run) for run in runs if run]
 
 
 def _night_like_reason(
@@ -477,39 +503,42 @@ class AnomalyEngine:
         longest = 0.0
         held: list[SuppressedEpisode] = []
         for item in days:
-            if not item.exercise_overlap:
-                continue
-            probe = replace(item, detection_samples=item.exercise_overlap)
-            episodes = sustained_rate_episodes(
-                probe, config, direction=DIRECTION_HIGH, threshold=threshold
-            )
-            for episode in merge_episodes(episodes, config):
-                reason = self._gate(episode)
-                if reason is not None:
-                    continue
-                stretches += 1
-                longest = max(longest, episode.duration_minutes)
-                held.append(
-                    SuppressedEpisode(
-                        type=episode.type,
-                        context=episode.context,
-                        onset=episode.onset,
-                        offset=episode.offset,
-                        reason=(
-                            f"{episode.observed:.0f} bpm sustained for {episode.duration_minutes:g} min "
-                            "inside an exercise span: attributed to activity rather than reported"
-                        ),
-                        observed=episode.observed,
-                        threshold=episode.threshold,
-                        mean=episode.mean,
-                        detail={
-                            "readings": episode.reading_count,
-                            "coverage": round(episode.coverage, 4),
-                            "exercise_overlap": True,
-                            **(episode.detail or {}),
-                        },
-                    )
+            for run in _contiguous_runs(
+                item.exercise_overlap,
+                epoch_seconds=item.epoch_seconds,
+                merge_gap_minutes=config.merge_gap_minutes,
+            ):
+                probe = replace(item, detection_samples=run)
+                episodes = sustained_rate_episodes(
+                    probe, config, direction=DIRECTION_HIGH, threshold=threshold
                 )
+                for episode in merge_episodes(episodes, config):
+                    reason = self._gate(episode)
+                    if reason is not None:
+                        continue
+                    stretches += 1
+                    longest = max(longest, episode.duration_minutes)
+                    held.append(
+                        SuppressedEpisode(
+                            type=episode.type,
+                            context=episode.context,
+                            onset=episode.onset,
+                            offset=episode.offset,
+                            reason=(
+                                f"{episode.observed:.0f} bpm sustained for {episode.duration_minutes:g} min "
+                                "inside an exercise span: attributed to activity rather than reported"
+                            ),
+                            observed=episode.observed,
+                            threshold=episode.threshold,
+                            mean=episode.mean,
+                            detail={
+                                "readings": episode.reading_count,
+                                "coverage": round(episode.coverage, 4),
+                                "exercise_overlap": True,
+                                **(episode.detail or {}),
+                            },
+                        )
+                    )
         if not stretches:
             return None, []
         return (

@@ -10,9 +10,11 @@ synthetic in ``dev_annotation``.
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
-from .common import EXIT_OK, Session, print_json
+from .common import EXIT_ERROR, EXIT_OK, EXIT_USAGE, Session, print_json
 
 
 def register(sub: "argparse._SubParsersAction") -> None:
@@ -42,6 +44,24 @@ def register(sub: "argparse._SubParsersAction") -> None:
     info = dsub.add_parser("info", help="what is in the store right now")
     info.add_argument("--json", action="store_true")
     info.set_defaults(func=cmd_dev_info)
+
+    accuracy = dsub.add_parser(
+        "accuracy",
+        help="score the anomaly detector against the labelled fixtures, as a confusion matrix",
+    )
+    accuracy.add_argument(
+        "--fixture",
+        default=None,
+        help="labelled fixture to score against (default: the checked-in one)",
+    )
+    accuracy.add_argument(
+        "--wearers",
+        type=int,
+        default=0,
+        help="score only the first N wearers in the fixture (0 = all of them)",
+    )
+    accuracy.add_argument("--json", action="store_true")
+    accuracy.set_defaults(func=cmd_dev_accuracy)
 
 
 def cmd_dev_seed(args: argparse.Namespace, session: Session) -> int:
@@ -110,3 +130,71 @@ def cmd_dev_info(args: argparse.Namespace, session: Session) -> int:
         print(f"  {dataset:<16} {count} points")
     print(f"  days with data: {days}")
     return EXIT_OK
+
+
+#: The checked-in fixture, when this module is running from a source checkout. A packaging
+#: layout without a ``tests/`` tree is not an error - it just means ``--fixture`` is required.
+DEFAULT_FIXTURE = (
+    Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "anomaly" / "hr_anomaly_labels.json"
+)
+
+
+def cmd_dev_accuracy(args: argparse.Namespace, session: Session) -> int:
+    """The accuracy gate, printed: labelled fixtures in, confusion matrix and floors out.
+
+    This is the same scoring ``tests/test_anomaly_accuracy_gate.py`` does on every CI run,
+    for a human who wants to see the matrix or wants it in a script. It seeds the fixture's
+    corpora into a temporary store - never the caller's - so it cannot disturb real data, and
+    it exits non-zero when a stated floor is missed.
+    """
+    import tempfile
+    from datetime import timedelta
+
+    from ..anomaly.accuracy import SHIPPED_FLOORS, LabelledSuite, format_report, score_suite
+    from ..anomaly.engine import detect
+
+    fixture = Path(args.fixture).expanduser() if args.fixture else DEFAULT_FIXTURE
+    if not fixture.exists():
+        print(
+            f"error: no labelled fixture at {fixture}\n"
+            "       pass --fixture PATH, or record one with scripts/dev/record_accuracy_fixtures.py",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    suite = LabelledSuite.load(fixture)
+    if args.wearers:
+        suite = LabelledSuite(
+            corpora=suite.corpora[: int(args.wearers)], tolerance=suite.tolerance, detail=suite.detail
+        )
+    results: dict = {}
+    with tempfile.TemporaryDirectory(prefix="fm-accuracy-") as tmp:
+        root = Path(tmp)
+        built = {corpus.wearer: corpus.build_store(root) for corpus in suite.corpora}
+        try:
+            for name, corpus in built.items():
+                if corpus.plan is None:
+                    print(f"error: corpus {name} has no generation plan to scope the run by", file=sys.stderr)
+                    return EXIT_USAGE
+                plan = corpus.plan
+                since = datetime(plan.start.year, plan.start.month, plan.start.day, tzinfo=UTC)
+                until = datetime(plan.end.year, plan.end.month, plan.end.day, tzinfo=UTC) + timedelta(days=1)
+                results[name] = detect(corpus.store, since, until)
+        finally:
+            for corpus in built.values():
+                corpus.close()
+    report = score_suite(suite, results)
+    failures = SHIPPED_FLOORS.failures(report)
+    if args.json:
+        print_json({**report.as_dict(), "floors_failed": failures, "fixture": str(fixture)})
+    else:
+        print(format_report(report))
+        print(
+            f"\n{len(suite.corpora)} wearer(s), {len(report.outcomes)} labels, fixture {fixture}"
+        )
+        if failures:
+            print("accuracy gate: FAILED")
+            for line in failures:
+                print(f"  - {line}")
+        else:
+            print("accuracy gate: passed")
+    return EXIT_ERROR if failures else EXIT_OK

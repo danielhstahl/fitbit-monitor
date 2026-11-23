@@ -35,6 +35,8 @@ DATASETS: dict[str, tuple[str, ...]] = {
 }
 
 INTRADAY_STEP = timedelta(minutes=5)
+#: 5-minute slots in an hour: the generator picks a workout *hour* and converts it.
+SLOTS_PER_HOUR = int(3600 // INTRADAY_STEP.total_seconds())
 
 #: The labelled episode shapes the detector suite needs coverage of.
 ANOMALY_KINDS: tuple[str, ...] = ("sustained_high", "sustained_low", "irregular")
@@ -108,8 +110,13 @@ def _resting_baseline(day_index: int) -> float:
 
 def _intraday(day: date, day_index: int, rng: random.Random) -> Iterator[tuple[datetime, dict[str, float]]]:
     resting = _resting_baseline(day_index) + rng.uniform(-1.2, 1.2)
-    exercise_at = rng.randrange(6, 19) if rng.random() < 0.55 else None
+    # A workout starts at some hour of the waking day, and `slot` below counts 5-minute
+    # intervals since midnight, so the hour has to be converted before it is compared.
+    # (It once was not, which put every synthetic workout in the middle of the night -
+    # not the shape a labelled detector fixture wants.)
+    exercise_hour = rng.randrange(6, 19) if rng.random() < 0.55 else None
     exercise_len = rng.randrange(5, 10)  # slots of 5 minutes => 25-45 min
+    exercise_at = None if exercise_hour is None else exercise_hour * SLOTS_PER_HOUR
     slot = 0
     t = _day_start(day)
     while t.time() < time(23, 55):

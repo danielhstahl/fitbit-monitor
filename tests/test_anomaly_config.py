@@ -172,7 +172,11 @@ class DefaultsAreStatedTestCase(unittest.TestCase):
         self.assertEqual(config.provisional_confidence_cap, 0.55)
         self.assertEqual(config.min_sustained_minutes, 20.0)
         self.assertEqual(config.irregularity_block_minutes, 30.0)
-        self.assertEqual(config.irregularity_floor, 0.15)
+        # 0.20, not the 0.15 this shipped before the labelled accuracy gate: the four
+        # scatter findings the lower floor produced were all inferred-workout onsets and
+        # none of the labelled irregular episodes needed it that low. See
+        # tests/test_anomaly_accuracy_gate.py and docs/detection.md.
+        self.assertEqual(config.irregularity_floor, 0.20)
         # The floor constants exist because a measured spread of zero is a degenerate bar; if
         # either ever defaults to zero the rules fire on nothing.
         self.assertGreater(config.min_spread_bpm, 0.0)
