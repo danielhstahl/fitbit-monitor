@@ -106,9 +106,23 @@ error:     the act-mcp tool 'run_workflow' has no workspace argument, and the se
   fix: start act-mcp against this checkout (act-mcp --workspace /workspace), or pass --server-bound ...
 ```
 
-A build of somebody else's checkout is not this repository's gate, so running in the
-server's own tree has to be asked for by name with `--server-bound`; the summary line then
-says so out loud (`the run measures that checkout, not this one`).
+A build of somebody else's checkout is not this repository's gate, so a path the client
+cannot match is refused until `--server-bound` says out loud that the two names mean one
+tree - which is exactly the case when a container sees this checkout as a bind mount under
+another path. What makes that trust safe is the commit: the note prints it, and act-mcp
+will not run at all unless its own checkout is at that commit and clean. The same opt-in is
+available per machine as `ACT_MCP_SERVER_BOUND=1`, which is how a container turned on the
+MCP runner without editing a script:
+
+One trap when a workflow really is run by act, locally or through act-mcp: act keeps its
+own cache of every third-party action, and a failure to refresh it is *non-terminating*, so
+a stale cached copy can fail a job that passes on GitHub. Old copies of
+`actions/setup-python` read this repository's four-line `.python-version` as a single
+version and answer `the version '3.14 3.13 3.12 3.11' ... was not found`; clear
+`~/.cache/act` (or give the container network access to fetch the action) before believing
+that failure. The current action resolves one line per interpreter, which is what both
+jobs rely on: the band is installed, and uv is then told which of the installed interpreters
+a given leg runs under.
 
 When the server does own this checkout, the remaining arguments it insists on are derived
 and printed before they are sent:

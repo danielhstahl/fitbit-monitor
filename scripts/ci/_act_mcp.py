@@ -244,13 +244,23 @@ def plan_workspace(
     requested: Path,
     override: str | None,
     server_bound: bool,
+    commit: str | None = None,
 ) -> WorkspaceMode:
     """Which argument carries the root - or why none does, and why that is the same tree.
 
     Three answers, in this order: an explicit ``--workspace-arg`` (an instruction, used
     whatever the schema says); a workspace-shaped argument in the tool's own schema (the
     normal case, and the only one that lets one server gate many checkouts); and a
-    workspace-bound server, which is only believed when it names the tree being gated.
+    workspace-bound server, whose tree has to be named before it is believed.
+
+    The third case has a trap in it. The paths can differ while the tree is the same - a
+    container sees a bind mount under another name than the host does - and they can
+    match in name while the trees differ. What actually ties a run to this code is the
+    commit: act-mcp resolves it locally, refuses to run unless its own checkout is at it,
+    and refuses outright when that checkout is dirty (`isolation_failed`). So a mismatch
+    is refused by default - the honest reading of "a server in another tree" - and
+    `--server-bound` says out loud that the two names mean one tree, with the pinned
+    commit printed as the thing that makes it true.
     """
     if override:
         return WorkspaceMode(override, f"sent as --{override}, per the caller's override")
@@ -260,19 +270,26 @@ def plan_workspace(
     advertised = advertised_workspace(client.init_result)
     if advertised == requested:
         return WorkspaceMode(None, f"the server binds its own workspace and it is this one ({requested})")
+    named = advertised if advertised else "a workspace it never named"
+    pinned = f"; the run is pinned to {commit[:9]}, which the server must resolve in its own tree" if commit else ""
     if server_bound:
         return WorkspaceMode(
             None,
-            f"the server binds its own workspace{f' ({advertised})' if advertised else ''} and "
-            "--server-bound was passed: the run measures that checkout, not this one",
+            f"the server calls its workspace {named} and this checkout is {requested}; trusted by "
+            f"--server-bound{pinned}",
         )
     raise ActMcpError(
-        f"the act-mcp tool {tool.get('name')!r} has no workspace argument, and the server runs "
-        f"{advertised if advertised else 'a workspace it never named'} rather than {requested}\n"
+        f"the act-mcp tool {tool.get('name')!r} has no workspace argument, and the server calls its "
+        f"workspace {named} rather than {requested}\n"
         f"  fix: start act-mcp against this checkout (act-mcp --workspace {requested}), or pass "
-        "--server-bound to accept a run in the server's own tree, or run the gates directly "
-        "with --via direct"
+        "--server-bound when those two paths name the same tree (a container sees a bind mount "
+        "under another name), or run the gates directly with --via direct"
     )
+
+
+def _env_flag(name: str) -> bool:
+    """A per-machine switch in the environment, so opting in never means editing a script."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def head_commit(workspace: Path) -> str | None:
@@ -814,6 +831,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
             requested=workspace,
             override=args.workspace_arg,
             server_bound=args.server_bound,
+            commit=head_commit(workspace),
         )
     except ActMcpError as exc:
         print(f"error:     {exc}", file=sys.stderr, flush=True)
@@ -852,15 +870,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     workspace = resolve_workspace(args.workspace)
     print(f"workspace: {workspace} (resolved from --workspace)", flush=True)
     client, tool = connect(args)
+    commit = args.commit or head_commit(workspace)
     mode = plan_workspace(
         tool=tool,
         client=client,
         requested=workspace,
         override=args.workspace_arg,
         server_bound=args.server_bound,
+        commit=commit,
     )
     print(f"mode:      {mode.note}", flush=True)
-    commit = args.commit or head_commit(workspace)
     category = args.category
     if category is None:
         tasks = list_tasks_tool(getattr(client, "tools", []))
@@ -931,7 +950,9 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument(
         "--server-bound",
         action="store_true",
-        help="accept a server that runs its own checkout, whoever owns it",
+        default=_env_flag("ACT_MCP_SERVER_BOUND"),
+        help="accept a server that runs its own checkout, whoever owns it "
+        "(default: $ACT_MCP_SERVER_BOUND)",
     )
     discover.set_defaults(func=cmd_discover)
 
@@ -948,7 +969,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--server-bound",
         action="store_true",
-        help="send no workspace argument even if the server's own words name another checkout",
+        default=_env_flag("ACT_MCP_SERVER_BOUND"),
+        help="send no workspace argument even if the server's own words name another checkout "
+        "(default: $ACT_MCP_SERVER_BOUND)",
     )
     run.add_argument("--job", default=None, help="job id to run, e.g. coverage")
     run.add_argument("--workflow", default=None, help="workflow file to run it from, e.g. ci.yml")

@@ -838,8 +838,9 @@ class WorkspaceBoundServerTest(unittest.TestCase):
                 "--server-bound",
             )
         self.assertEqual(chosen.returncode, 0, chosen.stdout + chosen.stderr)
-        self.assertIn("the run measures that checkout, not this one", chosen.stdout)
+        self.assertIn("trusted by --server-bound", chosen.stdout)
         self.assertIn(str(elsewhere), chosen.stdout)
+        self.assertIn(self.head[:9], chosen.stdout, "the note names the commit the run is pinned to")
 
     def test_the_category_hint_comes_from_the_server_and_not_from_the_job_name(self) -> None:
         catalogue = StubMcpServer(
@@ -925,6 +926,38 @@ class WorkspaceBoundServerTest(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("the server's own checkout cannot run this commit", result.stderr)
+
+    def test_the_same_tree_under_another_path_can_be_trusted_from_the_environment(self) -> None:
+        """One container's `/workspace` is the host's `/Users/.../fitbit-monitor`.
+
+        A bind mount gives one tree two names, so the mismatch has an environment switch of
+        its own: that is how a machine opts into the MCP runner without anyone editing a
+        script, and without the default ever trusting a path it cannot match.
+        """
+        elsewhere = make_repo(Path(tempfile.mkdtemp()))
+        with self.server(root=elsewhere) as server:
+            arguments = [
+                "--url",
+                server.url,
+                "run",
+                "--workspace",
+                str(self.tmp),
+                "--workflow",
+                "ci.yml",
+                "--job",
+                "coverage",
+            ]
+            strict = act_client(*arguments)
+            self.assertEqual(strict.returncode, 2, strict.stderr)
+            trusted = subprocess.run(
+                [sys.executable, str(ACT_MCP), *arguments],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=dict(os.environ, ACT_MCP_TIMEOUT="5", ACT_MCP_SERVER_BOUND="1"),
+            )
+        self.assertEqual(trusted.returncode, 0, trusted.stdout + trusted.stderr)
+        self.assertIn("trusted by --server-bound", trusted.stdout)
 
     def test_a_required_argument_this_client_cannot_derive_stops_before_the_call(self) -> None:
         tool = {
