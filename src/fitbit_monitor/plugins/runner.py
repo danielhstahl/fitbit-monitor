@@ -10,6 +10,9 @@ call after each import, so the isolation rules live here once:
 * **"Nothing found" and "nothing to find" are different answers.** A plugin whose
   declared datasets are empty for the window is reported ``no_data`` without being
   run, and is not the same as a plugin that ran and produced nothing.
+* **A config key nobody reads is named, not swallowed.** A ``[plugins.<name>]`` key no
+  option declares is reported as an *unused config key* on that plugin's row and the
+  run still succeeds - the plugin did run, on its declared defaults.
 * **Exit codes mean something.** Nonzero only when a plugin errored, never merely
   because it found nothing to report.
 """
@@ -70,6 +73,10 @@ class PluginOutcome:
     skipped_reason: str | None = None
     coverage: dict[str, dict[str, Any]] = field(default_factory=dict)
     datasets: tuple[str, ...] = ()
+    #: Keys the user set in ``[plugins.<name>]`` that this plugin declares no option
+    #: for - almost always a typo. Named in the report, never a failure: the plugin
+    #: still ran, on its declared defaults.
+    unknown_config_keys: list[str] = field(default_factory=list)
 
     @property
     def produced(self) -> int:
@@ -109,6 +116,7 @@ class PluginOutcome:
             "source": self.source,
             "duration_ms": round(self.duration * 1000.0, 1),
             "datasets": list(self.datasets),
+            "unknown_config_keys": list(self.unknown_config_keys),
             "metrics": [m.as_dict() for m in self.metrics],
             "alerts": [a.as_dict() for a in self.alerts],
             "deliveries": [d.as_dict() for d in self.deliveries],
@@ -177,6 +185,11 @@ class RunReport:
                     lines.append(f"      {metric.key} = {_fmt(metric.value)}" + (f" {metric.unit}" if metric.unit else ""))
                 for alert in outcome.alerts:
                     lines.append("      " + alert.rendered().replace("\n", " / "))
+            if outcome.unknown_config_keys:
+                lines.append(
+                    f"      note: unused config keys: {', '.join(outcome.unknown_config_keys)}"
+                    " - this plugin declares no option by that name, so they were ignored"
+                )
         lines.append(
             "summary: "
             + ", ".join(f"{count} {status}" for status, count in counts.items() if count)
@@ -263,6 +276,7 @@ def _run_one(
         outcome.error = str(exc)
         outcome.error_type = type(exc).__name__
         return outcome
+    outcome.unknown_config_keys = list(plugin_config.unknown_keys)
     if not plugin_config.enabled:
         outcome.status = STATUS_SKIPPED
         outcome.skipped_reason = f"disabled in config ([plugins.{name}] enabled = false)"

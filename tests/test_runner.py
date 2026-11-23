@@ -108,6 +108,23 @@ class RunnerTest(unittest.TestCase):
         report = self.run_names(["ok_plugin"], config=support.make_config({"ok_plugin": {"threshold": 10.0}}))
         self.assertEqual(len(self.outcome(report, "ok_plugin").alerts), 1)
 
+    def test_config_key_nobody_declares_is_named_not_swallowed(self) -> None:
+        """A typo in `[plugins.ok_plugin]` must reach the report - and must not fail the run."""
+        report = self.run_names(["ok_plugin"], config=support.make_config({"ok_plugin": {"threshhold": 20.0}}))
+        outcome = self.outcome(report, "ok_plugin")
+        self.assertEqual(outcome.status, STATUS_OK)
+        self.assertEqual(outcome.unknown_config_keys, ["threshhold"])
+        self.assertEqual(report.exit_code, 0, "an ignored key is a note, not a plugin failure")
+        self.assertIn("unused config keys: threshhold", report.render_text())
+        self.assertEqual(report.as_dict()["outcomes"][0]["unknown_config_keys"], ["threshhold"])
+
+    def test_host_config_options_are_never_reported_as_unused(self) -> None:
+        """`timeout_seconds` is read by the runner, so flagging it would be a false alarm."""
+        report = self.run_names(["ok_plugin"], config=support.make_config({"ok_plugin": {"timeout_seconds": 30}}))
+        outcome = self.outcome(report, "ok_plugin")
+        self.assertEqual(outcome.unknown_config_keys, [])
+        self.assertEqual(outcome.status, STATUS_OK)
+
     def test_declared_option_types_are_coerced_before_run(self) -> None:
         report = self.run_names(["ok_plugin"], config=support.make_config({"ok_plugin": {"threshold": "30"}}))
         self.assertEqual(len(self.outcome(report, "ok_plugin").alerts), 1)

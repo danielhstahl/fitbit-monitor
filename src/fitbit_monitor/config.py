@@ -61,6 +61,14 @@ def _expand(value: Any) -> Any:
     return value
 
 
+#: Keys the *host* acts on, valid in every ``[plugins.<name>]`` section, so they are
+#: never reported as undeclared: ``enabled`` is the runner's on/off switch and
+#: ``timeout_seconds`` its per-plugin wall-clock budget. Both are read by
+#: ``plugins.runner``, not by the plugin, so neither belongs in a plugin's own
+#: ``options`` - and neither may show up in :attr:`PluginConfig.unknown_keys`.
+HOST_PLUGIN_OPTIONS = frozenset({"enabled", "timeout_seconds"})
+
+
 @dataclass(frozen=True)
 class PluginConfig(Mapping[str, Any]):
     """Read-only, plugin-scoped options with the plugin's own declared defaults.
@@ -371,8 +379,7 @@ class AppConfig:
             plugin_name=plugin_name,
             settings=dict(values),
             defaults=merged_defaults,
-            # `enabled` is the host's on/off switch, valid for every plugin.
-            declared=frozenset(set(merged_defaults) | {"enabled"}),
+            declared=frozenset(set(merged_defaults) | HOST_PLUGIN_OPTIONS),
         )
 
 

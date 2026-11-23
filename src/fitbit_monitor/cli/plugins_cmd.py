@@ -167,8 +167,10 @@ def cmd_plugins_show(args: argparse.Namespace, session: Session) -> int:
         print(f"no plugin named {args.name!r}; see `fm plugins list`", file=sys.stderr)
         return EXIT_USAGE
     info = record.describe()
+    declared_defaults: dict[str, Any] = {}
     if record.ok and record.plugin_class is not None:
-        section = session.config.plugin_config(args.name, record.plugin_class.declared_defaults())
+        declared_defaults = record.plugin_class.declared_defaults()
+        section = session.config.plugin_config(args.name, declared_defaults)
         info["enabled"] = section.enabled
         info["config"] = section.as_dict()
         unknown = section.unknown_keys
@@ -194,6 +196,23 @@ def cmd_plugins_show(args: argparse.Namespace, session: Session) -> int:
             print(f"    {option['name']:<20} {option['type']:<8} {option.get('help', '')}{default}")
     else:
         print("  options:    (none)")
+    # What the config file actually changed, and what it changed that nobody reads:
+    # the two questions a person asks before editing config.toml again.
+    if "config" in info:
+        unused = set(info.get("unknown_config_keys") or ())
+        overrides: list[str] = []
+        for key, value in info["config"].items():
+            if key in unused or key == "enabled" or declared_defaults.get(key) == value:
+                continue
+            if key in declared_defaults:
+                overrides.append(f"{key} = {value} (default {declared_defaults[key]})")
+            else:
+                # A shared `[plugins.defaults]` key or a host option: honoured, but the
+                # plugin never declared it, so there is no default of its own to name.
+                overrides.append(f"{key} = {value} (no declared default)")
+        print("  config:     " + ("; ".join(overrides) if overrides else "every option at its declared default"))
+    for key in info.get("unknown_config_keys") or []:
+        print(f"  unused:     {key} - {args.name} declares no option by that name, so it is ignored")
     if record.error is not None:
         print(f"  ERROR ({record.error.stage}): {record.error}")
         return EXIT_ERROR

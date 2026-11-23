@@ -102,6 +102,18 @@ class ConfigTest(unittest.TestCase):
         # by `fm plugins show` rather than silently ignored.
         self.assertEqual(stray.unknown_keys, ("mystery_option",))
 
+    def test_host_options_are_declared_for_every_plugin(self) -> None:
+        """`enabled` and `timeout_seconds` are the host's switches, legal in any section.
+
+        Flagging them would send a user chasing a typo that never happened.
+        """
+        path = self.home / "host-keys.toml"
+        path.write_text("[plugins]\ndirs = []\n\n[plugins.solo]\nenabled = true\ntimeout_seconds = 5\n")
+        section = AppConfig.load(path).plugin_config("solo", {"threshold": 60.0})
+        self.assertEqual(section.unknown_keys, ())
+        self.assertTrue(section.enabled)
+        self.assertEqual(section.get("timeout_seconds"), 5)
+
     def test_typed_accessors_coerce_and_complain(self) -> None:
         section = PluginConfig(
             plugin_name="p",

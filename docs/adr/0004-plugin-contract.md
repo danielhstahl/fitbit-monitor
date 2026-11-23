@@ -371,8 +371,11 @@ class PluginOption:
 `None` and letting a plugin guess.
 
 Keys a plugin never declared are not silently ignored: `PluginConfig.unknown_keys` is
-reported as *unused config keys* by `fm plugins show` and `fm plugins validate`, which
-is how a typo in a user's `config.toml` becomes visible instead of mysterious.
+reported as *unused config keys* by `fm plugins show`, `fm plugins validate` and - as a
+note under the plugin that ignored them, without failing the run - `fm plugins run`,
+which is how a typo in a user's `config.toml` becomes visible instead of mysterious.
+`enabled` and `timeout_seconds` are the host's own switches, declared for every plugin,
+so neither is ever reported as unused.
 
 A plugin **declares the datasets it needs** in `datasets`, and the runner uses that
 declaration as a gate: before `run()` is called it records `store.coverage(dataset,

@@ -208,9 +208,14 @@ url = "https://hooks.example.invalid/…"
 enabled = false                  # the only outbound path; off unless you turn it on
 ```
 
-* A plugin sees **only its own section**. `fm plugins show NAME` prints the
-  effective values, and warns about keys the plugin never declared (almost always a
-  typo).
+* A plugin sees **only its own section**. `fm plugins show NAME` prints the effective
+  values (only the ones that differ from the plugin's declared default), and warns
+  about keys the plugin never declared (almost always a typo). `fm plugins run` names
+  the same keys as `unused config keys` under the plugin that ignored them and still
+  exits 0 - the plugin ran, on its defaults; `fm plugins validate` checks this without
+  running anything.
+* `enabled` and `timeout_seconds` are the host's own switches, valid in every
+  `[plugins.<name>]` section and never reported as unused.
 * Values are coerced to the declared option type before `configure()` is called; a
   bad value is reported as `MISCONFIGURED`, not as a crash, and the other plugins
   still run.
@@ -304,6 +309,14 @@ Exit codes, the same for every command:
 ```console
 resting_trend: no data - nothing stored for daily_summary, hrv, heart_rate in range
 silent_plugin: ok - ran, nothing to report for this range
+```
+
+A key in `[plugins.<name>]` that no option declares is named rather than swallowed,
+and does not fail the run:
+
+```console
+resting_trend: ok (2 metrics)
+      note: unused config keys: hrv_feild - this plugin declares no option by that name, so they were ignored
 ```
 
 ---
@@ -435,6 +448,7 @@ resting_trend 0.1.0
     min_days_per_week    int      weeks with fewer days present than this are reported as incomplete [default: 4]
     hrv_field            str      which HRV measure to report [default: rmssd]
     resting_source       str      where resting HR comes from: a stored daily value, or the quiet overnight window [default: auto]
+  config:     every option at its declared default
 
 $ fm plugins run resting_trend --since 5w --json | python -m json.tool | head -30
 ```

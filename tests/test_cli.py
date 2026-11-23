@@ -225,6 +225,22 @@ class PluginsListTest(CliTestCase):
         self.assertEqual(payload["name"], "resting_trend")
         self.assertTrue(payload["enabled"])
 
+    def test_show_prints_effective_values_and_names_undeclared_keys(self) -> None:
+        """The human form has to answer "what did my config change, and what did I typo"."""
+        config = self.home / "config" / "fitbit-monitor" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('[plugins.resting_trend]\nlookback_weeks = 3\ntimeout_seconds = 5\nhrv_feild = "sdnn"\n')
+        _, text = self.fm("plugins", "show", "resting_trend", expect=0)
+        self.assertIn("config:", text)
+        self.assertIn("lookback_weeks = 3", text)
+        self.assertIn("timeout_seconds = 5 (no declared default)", text)
+        self.assertIn("unused:", text)
+        self.assertIn("hrv_feild", text)
+        _, text = self.fm("plugins", "show", "resting_trend", "--json", expect=0)
+        self.assertEqual(json.loads(text)["unknown_config_keys"], ["hrv_feild"])
+        _, text = self.fm("plugins", "show", "resting_trend", "--json", expect=0)
+        self.assertEqual(json.loads(text)["config"]["lookback_weeks"], 3)
+
     def test_show_unknown_plugin_is_a_usage_error(self) -> None:
         _, text = self.fm("plugins", "show", "nope", expect=2)
         self.assertIn("no plugin named", text)
@@ -263,6 +279,21 @@ class ValidateTest(CliTestCase):
         config.write_text('[plugins.resting_trend]\nhrv_field = "nonsense"\nlookback_weeks = "many"\n')
         _, text = self.fm("plugins", "validate", "resting_trend", expect=1)
         self.assertIn("FAILED", text)
+
+    def test_host_options_are_not_reported_as_unused(self) -> None:
+        """`timeout_seconds` and `enabled` belong to the host; a clean section stays clean."""
+        config = self.home / "config" / "fitbit-monitor" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("[plugins.resting_trend]\nenabled = true\ntimeout_seconds = 5\n")
+        _, text = self.fm("plugins", "validate", "resting_trend", expect=0)
+        self.assertNotIn("unused config keys", text)
+
+    def test_undeclared_key_is_named_without_failing_validation(self) -> None:
+        config = self.home / "config" / "fitbit-monitor" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('[plugins.resting_trend]\nhrv_feild = "sdnn"\n')
+        _, text = self.fm("plugins", "validate", "resting_trend", expect=0)
+        self.assertIn("unused config keys: hrv_feild", text)
 
 
 class RunTest(CliTestCase):
@@ -325,6 +356,16 @@ class RunTest(CliTestCase):
         config.write_text("[plugins.resting_trend]\nenabled = false\n")
         _, text = self.fm("plugins", "run", "--all", "--since", "30d", expect=0)
         self.assertIn("skipped", text)
+
+    def test_a_key_the_plugin_does_not_declare_is_named_and_costs_nothing(self) -> None:
+        """`hrv_feild` is a typo, not a failure: the run says so and still exits 0."""
+        config = self.home / "config" / "fitbit-monitor" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('[plugins.resting_trend]\nhrv_feild = "sdnn"\n')
+        _, text = self.fm("plugins", "run", "resting_trend", "--since", "30d", expect=0)
+        self.assertIn("unused config keys: hrv_feild", text)
+        _, text = self.fm("plugins", "run", "resting_trend", "--since", "30d", "--json", expect=0)
+        self.assertEqual(json.loads(text)["outcomes"][0]["unknown_config_keys"], ["hrv_feild"])
 
     def test_broken_plugin_exits_nonzero_but_the_others_run(self) -> None:
         support.write_plugin_file(self.plugins_dir, "bad.py", BROKEN_PLUGIN)
