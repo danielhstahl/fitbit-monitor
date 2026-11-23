@@ -10,6 +10,10 @@ offset, a duration, the personal level it was compared against, the spread that 
 from, the evidence series, and a confidence that says how much the engine is allowed to
 believe itself.
 
+The plugin that turns those measurements into alerts - with the plain-language framing, the
+alerting policy and the per-plugin config - is `hr-anomaly`, and it is documented in
+[docs/plugins.md](plugins.md#reference-hr-anomaly-the-built-in-alerting-example).
+
 * The feature layer it reads: `fitbit_monitor.hr` - epoch series, resting and sleep windows,
   the exercise mask, and interval-derived scatter. `fitbit_monitor.hr.windows` and
   `fitbit_monitor.hr.daily` are the two this engine leans on most, and their thresholds are
@@ -203,7 +207,25 @@ Every threshold is a field on `AnomalyConfig`, every field is a declared plugin 
 invalid combinations are refused at construction - a `z` below 1.0, a provisional minimum
 above the established one, a confidence ceiling of 1.0, a baseline window shorter than the
 baseline it is supposed to hold. See `fitbit_monitor/anomaly/config.py` for the annotated
-defaults and [docs/plugins.md](plugins.md) for setting them per plugin.
+defaults.
+
+Set them per plugin in `[plugins.hr-anomaly]`, which declares every one of them plus its
+own alerting policy (`min_confidence`, `cooldown`, `max_alerts`, `min_window_coverage`):
+
+```toml
+[plugins.hr-anomaly]
+min_baseline_days = 10            # more history before a finding may claim full confidence
+min_sustained_minutes = 30        # a longer stretch past the bar before anything is reported
+z_high = 4.5                      # harder to call an elevation abnormal for this wearer
+```
+
+```console
+$ fm plugins show hr-anomaly            # every option, its default, and what the file changed
+$ fm plugins run hr-anomaly --since 30d --set hr-anomaly.z_high=4.5   # one run, no edit
+```
+
+[docs/plugins.md](plugins.md) is the guide to running and configuring it; this document is
+about what the numbers mean.
 
 ## What this library will not do
 

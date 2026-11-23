@@ -11,10 +11,11 @@ anywhere except the alert webhook you configure - see
 [docs/data-policy.md](docs/data-policy.md).
 
 > Status: the store core, the plugin system and the import path (`fm auth`,
-> `fm import`) are implemented, including the shipped `resting_trend` example
-> plugin. `fm dev seed` still writes a deterministic sample corpus, so every
-> command below works before you have connected an account - and that corpus is
-> synthetic data about nobody, never real health data and never sent anywhere.
+> `fm import`) are implemented, including the two shipped example plugins -
+> `resting_trend` (metrics) and `hr-anomaly` (alerts). `fm dev seed` still writes a
+> deterministic sample corpus, so every command below works before you have connected an
+> account - and that corpus is synthetic data about nobody, never real health data and
+> never sent anywhere.
 >
 > Two commands - `fm report` and `fm doctor` - are declared in the parser and in the
 > table below but do not compute anything yet: they print what will replace the
@@ -49,6 +50,7 @@ fm plugins list                       # what is installed, and what is broken
 fm plugins show resting_trend         # one plugin's options and effective config
 fm plugins run --all --since 30d      # compute metrics, deliver alerts
 fm plugins run resting_trend --since 8w --json
+fm plugins run --name hr-anomaly --since 90d    # alert on what is unusual for you
 fm alerts list --since 7d             # what has been flagged
 fm plugins --api                      # the plugin API version this build serves
 ```
@@ -120,8 +122,8 @@ budget, and cannot write to the database even by reaching for the raw connection
 SQLite refuses it. Alerts are stored, deduplicated against a cooldown, printed,
 appended to JSONL, and optionally POSTed to one HTTPS webhook.
 
-* [docs/plugins.md](docs/plugins.md) - authoring guide, API reference, and the
-  built-in plugin explained.
+* [docs/plugins.md](docs/plugins.md) - authoring guide, API reference, and the two
+  built-in plugins explained.
 * [docs/storage.md](docs/storage.md) - the store: schema, migrations, the read API,
   the UTC convention, verify/backup/export, and retention.
 * [docs/detection.md](docs/detection.md) - the anomaly engine: personal baselines, the
@@ -255,7 +257,8 @@ src/fitbit_monitor/
   api/         http (transport, fixtures), auth (PKCE, token store), client (rate limits, ETags), catalog (endpoint shapes)
   ingest/      importer (plan + run), pipeline (dedupe, quarantine), csv_source (export/Takeout), report, runlog
   plugins/     contract.py models.py loader.py registry.py runner.py sinks.py scaffold.py testing.py
-    builtin/   resting_trend.py - the reference plugin
+    builtin/   resting_trend.py - the reference metric plugin
+               hr_anomaly.py       - the reference alert plugin, over anomaly/
   cli/         common.py auth_cmd.py config_cmd.py db_cmd.py store_cmd.py import_cmd.py plugins_cmd.py alerts_cmd.py report_cmd.py doctor_cmd.py dev_cmd.py
   logsafe.py   health-value redaction for everything that reaches a log handler
 docs/          storage.md, plugins.md, data-import.md, data-policy.md, ci.md, adr/

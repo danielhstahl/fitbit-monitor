@@ -3,7 +3,7 @@
 Weekly resting heart rate and HRV, the two numbers most people actually track,
 with week-over-week and 4-week deltas and honest completeness reporting. It emits
 metrics and no alerts on purpose: it exists to be the readable example in
-``docs/plugins.md``, and the alerting example lives in the hr-anomaly epic.
+``docs/plugins.md``, and :mod:`hr_anomaly` beside it is the alerting example.
 
 It also demonstrates the three things every real plugin needs:
 

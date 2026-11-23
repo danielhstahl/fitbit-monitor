@@ -192,6 +192,33 @@ mappings - out-of-order evidence is rejected, because an alert that cannot say
 out and you get `<plugin>/<key>/<severity>`; set it when a group of keys describes
 one episode (say `night-2026-05-12` across three related findings).
 
+### What an alert should say
+
+An alert is the only place in this program where a number turns into a sentence, and a
+sentence about somebody's body is the easiest thing in the world to over-claim. The rule
+this codebase holds itself to, and the one `hr-anomaly` demonstrates:
+
+* **say what it is** - a heuristic over your own stored data, not a diagnosis and not
+  medical advice, and name the kind of sensor it came from. A wrist-worn consumer device
+  can see a rate; it cannot say what caused it or what it means.
+* **name the evidence** - the window, how many readings covered it and how much of the
+  span was actually recorded, the value that crossed the bar, the *personal* level and
+  threshold it was compared against, and the confidence with an explicit note about what
+  that number is not (it is not a probability that anything is wrong).
+* **point at the raw data** - a command that runs, so a reader can check the alert
+  instead of trusting it, plus how to see what has already been flagged.
+* **explain a quiet run** - every episode held back is reported, with who decided and
+  why. "Nothing happened" and "something happened, here is why it stayed quiet" are
+  different answers.
+
+That is a wording budget, not a shape the contract enforces: `Alert` requires a title, a
+message and a timestamp, and nothing stops a plugin writing three words. What the
+contract *does* enforce is that the words are chosen by the plugin and not inherited: a
+`Finding` from the detection engine arrives with no claim in it at all, so nothing can
+reach your user that you did not write. The reference alerting plugin is
+[`hr-anomaly`](#reference-hr-anomaly-the-built-in-alerting-example), and its own test suite
+asserts this framing is present in every message it emits.
+
 ---
 
 ## Configuration
@@ -210,6 +237,12 @@ dirs = ["~/fm-plugins"]          # drop-in directories, scanned in order
 enabled = true                   # false = skipped, with the reason printed
 lookback_weeks = 12              # must match a declared PluginOption
 hrv_field = "sdnn"
+
+[plugins.hr-anomaly]             # the built-in alert plugin: every engine threshold,
+enabled = true                   # plus its own alerting policy - see the reference below
+min_sustained_minutes = 20
+min_confidence = 0.3
+cooldown = "36h"
 
 [plugins.my_plugin]
 threshold = 62.0
@@ -360,8 +393,9 @@ without dedup: a broken history costs repeats, not the alert and not the run.
 
 ```console
 $ fm alerts list --since 7d
-SEEN              SEVERITY  PLUGIN/KEY              TITLE
-2026-05-12 03:00  warning   hr_anomaly/hr_high x37  Sustained rate at rest
+SEEN              SEVERITY  PLUGIN/KEY                    TITLE
+2026-05-12 03:00  critical  hr-anomaly/sustained_low x3   Heart rate held below your own usual level for 55 min
+2026-05-10 09:20  warning   hr-anomaly/irregular_rhythm   Beat-to-beat intervals were unusually uneven for 160 min
 ```
 
 `--json`, `--severity`, `--plugin` and `--limit` are there for scripts.
@@ -470,11 +504,11 @@ re-sign anything.
 
 ---
 
-## Reference: `resting_trend`, the built-in example
+## Reference: `resting_trend`, the built-in metric example
 
 The plugin that ships with fitbit-monitor, and the one the docs and CI treat as the
-reference: weekly resting heart rate and HRV, with week-over-week and 4-week
-deltas, and explicit completeness reporting.
+reference for **metrics**: weekly resting heart rate and HRV, with week-over-week and
+4-week deltas, and explicit completeness reporting.
 
 ```console
 $ fm plugins show resting_trend
@@ -496,6 +530,150 @@ $ fm plugins run resting_trend --since 5w --json | python -m json.tool | head -3
 
 It is short enough to read in one sitting:
 [`src/fitbit_monitor/plugins/builtin/resting_trend.py`](../src/fitbit_monitor/plugins/builtin/resting_trend.py).
+
+---
+
+## Reference: `hr-anomaly`, the built-in alerting example
+
+The other half of the contract: a plugin that decides *something is worth telling you
+about*. It reads your stored heart rate, hands it to the detection engine
+([docs/detection.md](detection.md), which owns every threshold and every statistic), and
+turns the findings into alerts the host delivers through the sinks above. The engine
+produces a measurement with no claim in it; this plugin is where the claim gets made,
+which is exactly why it lives in a plugin.
+
+```console
+$ fm plugins show hr-anomaly
+hr-anomaly 0.1.0
+  alerts when your heart rate strays from your own usual level, with the readings attached
+  source:     builtin (fitbit_monitor.plugins.builtin.HrAnomalyPlugin)
+  datasets:   heart_rate
+  plugin api: 1
+  enabled:    yes
+  options:
+    min_baseline_days    int      resting days needed before a finding may claim full confidence [default: 7]
+    z_high               float    robust z-score above the personal resting level that counts as sustained-high [default: 4.0]
+    min_sustained_minutes float    how long a rate must stay past its threshold to be a finding [default: 20.0]
+    ...                            (30 more: every field of AnomalyConfig, at its engine default)
+    min_confidence       float    findings below this confidence are reported as suppressed instead of alerted on [default: 0.3]
+    cooldown             duration two episodes of the same rule and context this close together are one alert in one run [default: 36h]
+    max_alerts           int      most alerts one run emits; the rest are reported as suppressed, least significant first [default: 10]
+    min_window_coverage  float    fraction of the run's days that must have heart-rate data, below it nothing is alerted on [default: 0.5]
+  config:     every option at its declared default
+
+$ fm plugins run --name hr-anomaly --since 20d --no-deliver
+ran 1 plugin(s) over 2026-11-03T16:40:34+00:00 .. 2026-11-23T16:40:34+00:00
+  hr-anomaly: ok (6 metrics, 1 alert)
+      hr_anomaly_data_coverage = 1 fraction of days
+      hr_anomaly_baseline = 60.4 bpm
+      hr_anomaly_baseline = 59.2 bpm
+      hr_anomaly_findings = 1 findings
+      hr_anomaly_alerts = 1 alerts
+      hr_anomaly_suppressed = 11 episodes
+      [CRITICAL] hr-anomaly: Beat-to-beat intervals were unusually uneven for 170 min (confidence 0.92) @ 2026-11-16 04:45 UTC /     Your beat-to-beat interval was far more uneven than your own ordinary unevenness for 2026-11-16 04:45 to 07:35 UTC while you were at rest (170 min, 21 readings, 97% of that span actually recorded): the scatter index reached 0.81 against your usual 0.06, past a bar of 0.15 (31.2 times your usual spread). Confidence 0.92 says how far those readings sat from your own ordinary spread and how complete the recording was (the personal baseline behind it is 21 days of data) - it is not a probability that anything is wrong, and it is not comparable between people. This is a heuristic pattern in your own recorded data, not a diagnosis and not medical advice: a wrist-worn consumer sensor can see what your rate did, it cannot tell you what caused it or what it means. To check it yourself: fm store export --dataset heart_rate --since 2026-11-16T04:35:00+00:00 --until 2026-11-16T07:45:00+00:00 --format csv prints the readings behind this window, and `fm alerts list --plugin hr-anomaly` lists every episode already flagged.
+summary: 1 ok; exit 0
+```
+
+(`--no-deliver` computes and prints without touching the sinks; without it the same alert
+is stored in history, printed by the console sink and appended to the JSONL file.)
+
+Read that alert message as the checklist in [What an alert should
+say](#what-an-alert-should-say) turned into prose: the window, how many readings covered
+it, the value that crossed the bar, the wearer's own level and threshold, a confidence
+with an explicit statement of what it is *not*, the framing sentence about the sensor and
+the heuristic, and a command that prints the readings. Note what it does **not** say: no
+condition, no severity beyond the sink's own `critical`/`warning`/`info`, no advice.
+
+The four metrics are the other half of the honesty. A run that raised one alert says so,
+and a run that raised none says which of four things happened:
+
+| metric | the question it answers |
+|---|---|
+| `hr_anomaly_data_coverage` | how much of this window was actually recorded (`too_thin_to_alert` when it declined to look) |
+| `hr_anomaly_baseline` | what every threshold was built from, per context, with `state` = `established` / `provisional` / `refused` |
+| `hr_anomaly_findings` | what crossed a rule, and `alerted: true/false` for what the plugin did about each |
+| `hr_anomaly_suppressed` | what did not become an alert, `by_code`, with the reason and who decided (`engine` or `hr-anomaly`) |
+
+`--json` carries all of it, including the rules that never ran:
+
+```console
+$ fm plugins run --name hr-anomaly --since 20d --json | python -m json.tool
+... (outcomes -> metrics, the hr_anomaly_suppressed entry)
+        {
+          "key": "hr_anomaly_suppressed",
+          "value": 11.0,
+          "summary": "11 candidate episode(s) did not become alerts",
+          "details": {
+            "by_code": {"engine_gate": 11},
+            "by_source": {"engine": 11},
+            "listed": 11,
+            "episodes": [
+              {
+                "decided_by": "engine",
+                "code": "engine_gate",
+                "type": "sustained_high",
+                "context": "rest",
+                "onset": "2026-11-04T01:20:00+00:00",
+                "offset": "2026-11-04T01:55:00+00:00",
+                "duration_minutes": 35.0,
+                "observed": 148.2,
+                "reason": "148 bpm sustained for 35 min inside an exercise span: attributed to activity rather than reported"
+              }
+            ],
+            "rules_that_did_not_run": [
+              {"rule": "sustained_high", "context": "rest",
+               "reason": "11 sustained stretch(es) above the high threshold (45 min longest) fell inside an exercise span and were attributed to activity, not reported"}
+            ],
+            "policy": {"min_confidence": 0.3, "cooldown": "36h", "max_alerts": 10,
+                       "min_window_coverage": 0.5, ...}
+          }
+        }
+```
+
+So a run that sent nothing can still be read: `by_code` counts the reasons, `by_source`
+says who decided (the engine, or this plugin's own policy), `episodes` lists every one
+of them in chronological order with the numbers that decided it, and
+`rules_that_did_not_run` names the rules that had no baseline to be measured against -
+which is the answer to "did it look, or did it not look?".
+
+And a window too thin to mean anything alerts on nothing - while still saying so, in the
+text report as well as in `--json`:
+
+```console
+$ fm plugins run hr-anomaly --since 45d   # with [plugins.hr-anomaly] min_window_coverage = 0.99
+ran 1 plugin(s) over 2026-10-09T16:40:56+00:00 .. 2026-11-23T16:40:56+00:00
+  hr-anomaly: ok (5 metrics)
+      hr_anomaly_declined = only 43 of 45 days in [2026-10-09T16:40:56+00:00, 2026-11-23T16:40:56+00:00) had heart_rate readings (96%), below this plugin's min_window_coverage of 0.99, so nothing was analysed and nothing was alerted on. A watch left on a nightstand is not a quiet heart: widen --since or store more days.
+      hr_anomaly_data_coverage = 0.96 fraction of days
+      hr_anomaly_suppressed = 1 episodes
+      hr_anomaly_findings = 0 findings
+      hr_anomaly_alerts = 0 alerts
+summary: 1 ok; exit 0
+```
+
+Its configuration is the engine's configuration, plus a small alerting policy of its own
+(a full annotated list of the thresholds is in [docs/detection.md](detection.md)):
+
+```toml
+[plugins.hr-anomaly]
+enabled = true
+time_zone = "Europe/Berlin"       # day boundaries and episode anchors, so a night is one day
+min_baseline_days = 7             # before this, findings are provisional and capped
+min_sustained_minutes = 20        # the "a single spike must not fire" knob
+z_high = 4.0                      # robust z above the wearer's own level
+min_window_coverage = 0.5         # below this fraction of days recorded, decline and say so
+min_confidence = 0.3              # weaker findings are reported as suppressed, not alerted
+cooldown = "36h"                  # two episodes of one rule this close are one alert in one run
+max_alerts = 10                   # a 90-day scan should not send 40 notifications
+```
+
+`cooldown` here is not `alerts.cooldown`: this plugin's collapses repeats *inside one
+scan*, and the sink's `alerts.cooldown` decides repeats *across runs*. Neither is a claim
+that an episode stopped happening.
+
+The source is the long version of everything above, with the reasoning next to each
+decision:
+[`src/fitbit_monitor/plugins/builtin/hr_anomaly.py`](../src/fitbit_monitor/plugins/builtin/hr_anomaly.py).
 
 ---
 

@@ -32,6 +32,9 @@ dev = ["pytest>=8", "pytest-cov>=5", "coverage[toml]>=7", "mypy>=1.10", "ruff>=0
 # classes into this group and `fm plugins list` finds them with no configuration.
 [project.entry-points."fitbit_monitor.plugins"]
 resting_trend = "fitbit_monitor.plugins.builtin.resting_trend:RestingTrendPlugin"
+# The reference alerting plugin. The name is the CLI and config key (`hr-anomaly`),
+# which is also what `[plugins.hr-anomaly]` in config.toml has to be spelled.
+"hr-anomaly" = "fitbit_monitor.plugins.builtin.hr_anomaly:HrAnomalyPlugin"
 
 [project.scripts]
 # Two names, one entrypoint (ADR-0001 §11): `fitbit-monitor` is the name that goes in

@@ -244,16 +244,39 @@ class EntryPointsTest(unittest.TestCase):
     def test_builtins_are_found_without_any_metadata(self) -> None:
         candidates = iter_builtin_candidates()
         self.assertTrue(any(c.location.endswith("RestingTrendPlugin") for c in candidates))
+        self.assertTrue(any(c.location.endswith("HrAnomalyPlugin") for c in candidates))
         registry = PluginRegistry._resolve(candidates)
         self.assertIn("resting_trend", registry.names())
+        self.assertIn("hr-anomaly", registry.names())
 
     def test_entry_point_group_name_is_the_documented_one(self) -> None:
         from fitbit_monitor.plugins import ENTRY_POINT_GROUP
 
         self.assertEqual(ENTRY_POINT_GROUP, "fitbit_monitor.plugins")
 
-    def test_the_shipped_distribution_declares_the_example_plugin(self) -> None:
-        """pyproject.toml must keep publishing the reference plugin, or the docs lie."""
+    def test_the_shipped_distribution_declares_the_example_plugins(self) -> None:
+        """pyproject.toml must keep publishing every reference plugin, or the docs lie.
+
+        Checked against the file rather than the installed metadata, so the test says
+        what will be published from this checkout even when the working tree has not
+        been reinstalled since the last entry point was added.
+        """
+        import importlib
+        import tomllib
+
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"][
+            "entry-points"
+        ]["fitbit_monitor.plugins"]
+        from fitbit_monitor.plugins.builtin import BUILTIN_PLUGINS
+
+        self.assertEqual(sorted(declared), sorted(cls.name for cls in BUILTIN_PLUGINS))
+        for name, value in declared.items():
+            module_name, _, class_name = value.partition(":")
+            loaded = getattr(importlib.import_module(module_name), class_name)
+            self.assertEqual(loaded.name, name, f"entry point {name} points at the wrong class")
+
+    def test_the_installed_distribution_publishes_the_example_plugin(self) -> None:
         entry_points = importlib.metadata.entry_points(group="fitbit_monitor.plugins")
         self.assertIn("resting_trend", [ep.name for ep in entry_points])
 
@@ -290,8 +313,14 @@ class CollisionTest(unittest.TestCase):
                 registry = PluginRegistry.discover(
                     AppConfig._from_raw(None, {"plugins": {"dirs": [str(directory)]}})
                 )
-        self.assertEqual(registry.names(), ["other", "resting_trend"])
-        self.assertEqual([r.name for r in registry.usable()], ["other", "resting_trend"])
+        self.assertEqual(
+            registry.names(), ["hr-anomaly", "other", "resting_trend"],
+            "every built-in plus the two directory plugins, in name order: the clash cost "
+            "the loser its name and nothing else",
+        )
+        self.assertEqual(
+            [r.name for r in registry.usable()], ["hr-anomaly", "other", "resting_trend"]
+        )
         self.assertEqual(registry.get("resting_trend").kind, "directory")
         self.assertEqual([c.name for c in registry.collisions], ["resting_trend"])
 
