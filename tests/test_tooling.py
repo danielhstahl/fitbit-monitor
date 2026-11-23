@@ -131,15 +131,22 @@ class DependencyPolicyTest(unittest.TestCase):
 class BenchmarkRecordTest(unittest.TestCase):
     """benchmarks/baseline.json is the reviewable half of the perf gate (ADR-0001 §9)."""
 
-    def test_baseline_names_a_unit_and_a_direction_for_every_case(self) -> None:
+    def test_baseline_names_a_unit_a_direction_and_a_budget_for_every_case(self) -> None:
         baseline = json.loads((REPO / "benchmarks" / "baseline.json").read_text())
-        for key in ("cases", "units", "direction", "recorded_utc", "days"):
+        for key in ("cases", "units", "direction", "budgets", "budget_notes", "memory",
+                    "recorded_utc", "days"):
             self.assertIn(key, baseline)
-        self.assertEqual(set(baseline["cases"]), set(baseline["units"]))
-        self.assertEqual(set(baseline["cases"]), set(baseline["direction"]))
+        for key in ("cases", "units", "direction", "budgets", "budget_notes"):
+            self.assertEqual(set(baseline["cases"]), set(baseline[key]), key)
         for name, value in baseline["cases"].items():
             self.assertGreater(value, 0, f"{name}: a baseline of zero can never be beaten")
             self.assertIn(baseline["direction"][name], ("higher", "lower"))
+            self.assertGreater(baseline["budgets"][name], 0, f"{name}: a budget of zero is not a budget")
+            self.assertTrue(baseline["budget_notes"][name].strip(), f"{name}: an empty budget note")
+        # The peak-RSS block: one number per case, or an honest absence.
+        memory = baseline["memory"]
+        self.assertIn(memory["method"], ("proc_self_statm", "rusage_maxrss", "unmeasured"))
+        self.assertEqual(set(memory["peak_rss_mib_per_case"]), set(baseline["cases"]))
 
     def test_baseline_records_how_noisy_the_recording_was_and_who_made_it(self) -> None:
         """A single number per case is not enough to review: how many samples, how wide,

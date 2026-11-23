@@ -34,8 +34,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
@@ -62,14 +64,73 @@ def _load_harness() -> Any:
 bench = _load_harness()
 
 BASELINE = REPO / "benchmarks" / "baseline.json"
+DOCS_CI = REPO / "docs" / "ci.md"
+BUDGET_HEADING = "### The budget each case has to fit inside"
+CASE_HEADING = "## What the benchmark gate measures"
 
 
-def case(name: str, samples: list[float] | None = None, better: str = "higher", factor: int = 1) -> bench.Case:
+def case(
+    name: str,
+    samples: list[float] | None = None,
+    better: str = "higher",
+    factor: int = 1,
+    budget: bench.Budget | None = None,
+) -> bench.Case:
     """A case with samples already taken - the statistics are what is under test here."""
     unit = "ms" if better == "lower" else "points/sec"
-    made = bench.Case(name, f"the {name} case", unit, lambda: 0.0, better=better, sample_factor=factor)
+    made = bench.Case(
+        name,
+        f"the {name} case",
+        unit,
+        lambda: 0.0,
+        better=better,
+        sample_factor=factor,
+        budget=budget,
+    )
     made.samples = list(samples or [])
     return made
+
+
+def measured_cases() -> list[bench.Case]:
+    """The cases the harness builds, from the smallest corpus that still fills a store.
+
+    Cached because building them costs a corpus write and every test that asks "what are
+    the cases?" wants the same answer.
+    """
+    global _MEASURED
+    if _MEASURED is None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path, window = bench.corpus(2, Path(tmp))
+            try:
+                _MEASURED = bench.build_cases(store_path, window, 2)
+            finally:
+                store_path.unlink(missing_ok=True)
+    return _MEASURED
+
+
+_MEASURED: list[bench.Case] | None = None
+
+
+def recorded_arrow(name: str) -> bool:
+    """True for a throughput case (its budget is a floor) - read from the baseline."""
+    return json.loads(BASELINE.read_text())["direction"].get(name, "higher") == "higher"
+
+
+def docs_tables(heading: str) -> list[list[str]]:
+    """Rows of the first markdown table under ``heading`` in ``docs/ci.md``.
+
+    The docs hold each case's budget in prose, so the only way to know the documentation
+    still says what the harness does is to read it back out of the file and compare.
+    """
+    text = DOCS_CI.read_text()
+    section = text.split(heading, 1)[1]
+    section = section.split("\n### ", 1)[0]
+    rows: list[list[str]] = []
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+    return rows
 
 
 def run_harness(*argv: str) -> tuple[int, str, str]:
@@ -117,24 +178,245 @@ class StatisticTest(unittest.TestCase):
     def test_the_sub_millisecond_cases_declare_the_extra_samples(self) -> None:
         factors = {
             "seed_corpus": 1,
+            "ingest_intraday": 1,
             "scan_intraday": 1,
             "downsample_to_days": 1,
             "hr_daily_features": 1,
             "anomaly_detect": 1,
+            "hr_anomaly_scan": 1,
             "plugin_resting_trend": 5,
             "discover_plugins": 20,
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            store_path, window = bench.corpus(2, Path(tmp))
-            try:
-                built = bench.build_cases(store_path, window, 2)
-            finally:
-                store_path.unlink(missing_ok=True)
+        built = measured_cases()
         self.assertEqual([c.name for c in built], list(factors))
         for made in built:
             self.assertEqual(made.sample_factor, factors[made.name], made.name)
             self.assertIn(made.unit, ("rows/sec", "points/sec", "days/sec", "ms"))
             self.assertIn(made.better, ("higher", "lower"))
+
+    def test_the_two_operations_that_must_not_get_slow_are_both_named_cases(self) -> None:
+        """Writing a quarter of intraday data, and scanning a quarter for anomalies.
+
+        Not components of them: the ingest call a real import makes, and the plugin run a
+        user makes. A component-level case can stay green while either of those doubles.
+        """
+        built = {c.name: c for c in measured_cases()}
+        self.assertEqual(built["ingest_intraday"].unit, "rows/sec")
+        self.assertEqual(built["hr_anomaly_scan"].unit, "days/sec")
+        self.assertEqual(built["anomaly_detect"].unit, "days/sec")
+        self.assertEqual(built["downsample_to_days"].unit, "points/sec")
+
+
+class BudgetTest(unittest.TestCase):
+    """Every case has a documented budget, and the documentation is the same one."""
+
+    def test_every_case_comes_with_a_budget_and_the_harness_refuses_one_without(self) -> None:
+        for made in measured_cases():
+            self.assertIsNotNone(made.budget, f"{made.name} has no budget")
+            self.assertGreater(made.budget.limit, 0.0, made.name)
+            self.assertTrue(made.budget.note.strip(), f"{made.name} has an empty budget note")
+        self.assertEqual({c.name for c in measured_cases()}, set(bench.BUDGETS))
+
+    def test_a_case_nobody_priced_is_refused_loudly(self) -> None:
+        """Adding a case and forgetting its budget must not be a quiet pass."""
+        saved = dict(bench.BUDGETS)
+        try:
+            bench.BUDGETS.pop("scan_intraday")
+            with tempfile.TemporaryDirectory() as tmp:
+                store_path, window = bench.corpus(1, Path(tmp))
+                with self.assertRaises(RuntimeError) as caught:
+                    bench.build_cases(store_path, window, 1)
+                store_path.unlink(missing_ok=True)
+        finally:
+            bench.BUDGETS.clear()
+            bench.BUDGETS.update(saved)
+        self.assertIn("scan_intraday", str(caught.exception))
+        self.assertIn("docs/ci.md", str(caught.exception))
+
+    def test_within_budget_reads_the_direction_of_the_case(self) -> None:
+        quick = case("scan_intraday", [120.0], budget=bench.Budget(100.0, "under a second"))
+        self.assertTrue(quick.within_budget)
+        self.assertIsNone(case("no_budget", [1.0]).within_budget, "no budget, no claim")
+        self.assertIsNone(case("empty", [], budget=bench.Budget(1.0, "x")).within_budget)
+        slow_ms = case("discover_plugins", [80.0], better="lower", budget=bench.Budget(50.0, "x"))
+        self.assertFalse(slow_ms.within_budget)
+
+    def test_a_breach_is_named_in_the_direction_that_was_missed(self) -> None:
+        breached = case("scan_intraday", [50.0], budget=bench.Budget(100.0, "under 1 s"))
+        problems = bench.budget_breaches([breached])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("scan_intraday", problems[0])
+        self.assertIn("below the documented budget of 100 points/sec", problems[0])
+        self.assertIn("under 1 s", problems[0])
+        self.assertEqual(bench.budget_breaches([case("scan_intraday", [50.0])]), [])
+
+    def test_the_budget_column_says_whether_it_was_met(self) -> None:
+        rows = bench.case_rows(
+            [case("scan_intraday", [50.0], budget=bench.Budget(100.0, "x"))], {}, 15.0, gated=True
+        )
+        self.assertEqual(rows[0]["budget"], 100.0)
+        self.assertFalse(rows[0]["budget_met"])
+        self.assertIn("✗", bench.budget_cell(rows[0]))
+        self.assertIn("≥ 100", bench.budget_cell(rows[0]))
+
+    def test_a_breach_is_reported_and_never_gates(self) -> None:
+        """The budget belongs to the reference runner; a red build belongs to a human."""
+        document = bench.results_document(
+            [case("scan_intraday", [50.0], budget=bench.Budget(100.0, "under 1 s"))],
+            {},
+            days=90,
+            repeats=1,
+            tolerance=15.0,
+            baseline_path=BASELINE,
+            problems=[],
+            gated=True,
+            skipped_reason=None,
+            seconds=1.0,
+        )
+        self.assertEqual(document["budgets"]["breached"], ["scan_intraday"])
+        self.assertFalse(document["budgets"]["gated"])
+        self.assertTrue(document["gate"]["passed"], "a budget breach is not a regression")
+        self.assertIn("Budget breaches", bench.render_markdown(document))
+
+    def test_docs_ci_md_states_the_budget_of_every_case(self) -> None:
+        """The budget is documentation first: the table is the promise, this is the proof."""
+        documented = {row[0].strip("`"): row for row in docs_tables(BUDGET_HEADING)}
+        self.assertEqual(set(documented), set(bench.BUDGETS), "docs and harness disagree on the cases")
+        units = json.loads(BASELINE.read_text())["units"]
+        for name, row in documented.items():
+            budget = bench.BUDGETS[name]
+            arrow = "≥" if recorded_arrow(name) else "≤"
+            self.assertTrue(row[1].startswith(arrow), f"{name}: wrong direction in the docs")
+            stated, _, unit = row[1][len(arrow):].strip().partition(" ")
+            self.assertEqual(unit, units[name], f"{name}: the budget is stated in another unit")
+            self.assertAlmostEqual(float(stated.replace(",", "")), budget.limit, places=6, msg=name)
+            self.assertEqual(row[2], budget.note, f"{name}: the docs say something else")
+
+    def test_docs_ci_md_names_every_case_and_no_others(self) -> None:
+        documented = {row[0].strip("`") for row in docs_tables(CASE_HEADING)}
+        self.assertEqual(documented, set(bench.BUDGETS))
+
+    def test_the_committed_baseline_carries_both_the_budget_and_the_measured_number(self) -> None:
+        recorded = json.loads(BASELINE.read_text())
+        self.assertEqual(set(recorded["budgets"]), set(recorded["cases"]))
+        self.assertEqual(set(recorded["budget_notes"]), set(recorded["cases"]))
+        for name, measured in recorded["cases"].items():
+            budget = recorded["budgets"][name]
+            self.assertAlmostEqual(budget, bench.BUDGETS[name].limit, places=6, msg=name)
+            self.assertEqual(recorded["budget_notes"][name], bench.BUDGETS[name].note)
+            if recorded["direction"][name] == "higher":
+                self.assertGreaterEqual(
+                    measured, budget, f"{name}: the recorded measurement breaks its own budget"
+                )
+            else:
+                self.assertLessEqual(
+                    measured, budget, f"{name}: the recorded measurement breaks its own budget"
+                )
+
+
+class MemoryProbeTest(unittest.TestCase):
+    """Peak RSS per case - measured where it can be, honestly absent where it cannot."""
+
+    def test_every_measured_case_comes_back_with_a_memory_answer(self) -> None:
+        def busy() -> float:
+            data = bytearray(64 * 1024 * 1024)
+            time.sleep(0.05)  # long enough for the sampler to see it
+            return float(len(data))
+
+        made = bench.Case("big_case", "allocates 64 MiB", "rows/sec", busy)
+        bench.measure([made], repeats=1)
+        if made.rss_method == "unmeasured":  # a platform with neither /proc nor rusage
+            self.assertIsNone(made.peak_rss_mib)
+            self.assertIsNone(made.peak_rss_delta_mib)
+            return
+        self.assertGreater(made.peak_rss_mib or 0.0, 0.0)
+        self.assertIsNotNone(made.peak_rss_delta_mib)
+        self.assertGreaterEqual(made.peak_rss_delta_mib or 0.0, 0.0)
+        if Path("/proc/self/statm").exists():
+            self.assertEqual(made.rss_method, "proc_self_statm")
+            self.assertGreater(made.peak_rss_delta_mib, 32.0, "the 64 MiB was not seen")
+
+    def test_the_summary_names_the_method_and_the_busiest_case(self) -> None:
+        """One block for the run, and no claim where nothing was measured."""
+        small, big = case("a", [1.0]), case("b", [1.0])
+        for made, peak, delta in ((small, 30.0, 1.0), (big, 41.5, 2.0)):
+            made.peak_rss_mib, made.peak_rss_delta_mib = peak, delta
+            made.rss_method = "proc_self_statm"
+        summary = bench.memory_summary([small, big])
+        self.assertEqual(summary["method"], "proc_self_statm")
+        self.assertEqual(summary["peak_rss_mib"], 41.5)
+        self.assertIn("process_peak_rss_mib", summary)
+        blind = case("c", [1.0])
+        blind_summary = bench.memory_summary([blind])
+        self.assertEqual(blind_summary["method"], "unmeasured")
+        self.assertIsNone(blind_summary["peak_rss_mib"])
+
+    def test_the_rusage_fallback_reports_a_floor_and_says_so(self) -> None:
+        saved = bench._rss_bytes
+        try:
+            bench._rss_bytes = lambda: (50 * 1024 * 1024, "rusage_maxrss")
+            made = bench.Case("small_case", "nothing", "rows/sec", lambda: 1.0)
+            bench.measure([made], repeats=1)
+        finally:
+            bench._rss_bytes = saved
+        self.assertEqual(made.rss_method, "rusage_maxrss")
+        self.assertEqual(made.peak_rss_mib, 50.0)
+        self.assertEqual(made.peak_rss_delta_mib, 0.0)
+
+    def test_a_platform_that_cannot_say_invents_nothing(self) -> None:
+        saved = bench._rss_bytes
+        try:
+            bench._rss_bytes = lambda: (None, "unmeasured")
+            made = bench.Case("blind_case", "nothing", "rows/sec", lambda: 1.0)
+            bench.measure([made], repeats=1)
+            summary = bench.memory_summary([made])
+        finally:
+            bench._rss_bytes = saved
+        self.assertEqual(made.rss_method, "unmeasured")
+        self.assertIsNone(made.peak_rss_mib)
+        self.assertIsNone(made.peak_rss_delta_mib)
+        self.assertEqual(summary["method"], "unmeasured")
+        document = bench.results_document(
+            [made], {}, days=90, repeats=1, tolerance=15.0, baseline_path=BASELINE,
+            problems=[], gated=False, skipped_reason="x", seconds=1.0,
+        )
+        self.assertIsNone(document["cases"][0]["peak_rss_mib"])
+        markdown = bench.render_markdown(document)
+        self.assertIn("not measurable here", markdown)
+        self.assertNotIn("| `blind_case` | - |", markdown)
+
+    def test_the_memory_block_is_in_the_baseline_too(self) -> None:
+        made = case("scan_intraday", [100.0, 110.0])
+        made.peak_rss_mib = 42.0
+        made.peak_rss_delta_mib = 1.5
+        made.rss_method = "proc_self_statm"
+        payload = bench.baseline_document([made], days=90, tolerance=15.0)
+        self.assertEqual(payload["memory"]["peak_rss_mib_per_case"], {"scan_intraday": 42.0})
+        self.assertEqual(payload["memory"]["peak_rss_delta_mib_per_case"], {"scan_intraday": 1.5})
+        self.assertEqual(json.loads(BASELINE.read_text())["memory"]["method"], "proc_self_statm")
+
+
+class PluginScanTest(unittest.TestCase):
+    """The hr-anomaly case measures the run it claims to."""
+
+    def test_days_analysed_comes_from_the_plugin_when_it_reports_one(self) -> None:
+        metric = SimpleNamespace(details={"scanned": {"days": 88, "samples": 21000}})
+        report = SimpleNamespace(metrics=[metric])
+        self.assertEqual(bench._days_analysed(report), 88)
+
+    def test_a_run_that_reports_nothing_falls_back_to_the_window(self) -> None:
+        self.assertIsNone(bench._days_analysed(SimpleNamespace(metrics=[])))
+        self.assertIsNone(bench._days_analysed(SimpleNamespace(metrics=[SimpleNamespace(details={})])))
+
+    def test_the_hr_anomaly_case_is_built_over_the_corpus_and_returns_days_per_second(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path, window = bench.corpus(3, Path(tmp))
+            try:
+                made = {c.name: c for c in bench.build_cases(store_path, window, 3)}["hr_anomaly_scan"]
+                value = made.fn()
+            finally:
+                store_path.unlink(missing_ok=True)
+        self.assertGreater(value, 0.0)
 
 
 class GateVerdictTest(unittest.TestCase):
@@ -302,6 +584,22 @@ class ReportTest(unittest.TestCase):
             self.assertGreaterEqual(row["iterations"], 1)
         self.assertIn("environment", self.document)
         self.assertEqual(self.document["gate"]["tracked_cases"], len(self.document["cases"]))
+
+    def test_both_reports_carry_the_budget_and_the_peak_memory(self) -> None:
+        """The AC pair: a documented budget and a measured number, in the same reports."""
+        self.assertEqual(self.document["budgets"]["documented"], len(self.document["cases"]))
+        self.assertFalse(self.document["budgets"]["gated"], "a budget is not a second gate")
+        self.assertIn("memory", self.document)
+        for row in self.document["cases"]:
+            self.assertIsNotNone(row["budget"], row["case"])
+            self.assertTrue(row["budget_note"], row["case"])
+            self.assertIn(row["budget_met"], (True, False), row["case"])
+            self.assertIn(row["rss_method"], ("proc_self_statm", "rusage_maxrss", "unmeasured"))
+        self.assertIn("| case | value | mean", self.markdown)
+        self.assertIn("budget | status |", self.markdown)
+        self.assertIn("### Peak RSS", self.markdown)
+        for row in self.document["cases"]:
+            self.assertIn(f"`{row['case']}` | ", self.markdown)
 
     def test_the_markdown_is_a_table_of_the_same_numbers(self) -> None:
         self.assertIn("## Benchmarks", self.markdown)

@@ -318,11 +318,14 @@ line - `coverage: 92.1%` - and a line per package, and fails below any floor com
 in `pyproject.toml`: `[tool.coverage.report] fail_under` for the whole tree and
 `[tool.fitbit_monitor.coverage]` for each directory under `src/fitbit_monitor`. It
 writes `coverage.xml` and `coverage.json`, both uploaded as artifacts. The benchmark
-gate compares the five cases in `scripts/bench/bench_plugin_system.py` with
-`benchmarks/baseline.json`, fails a case more than 15% past it, and writes
-`bench-results.json` (case, mean, stddev, iterations, environment) plus
-`bench-summary.md` - the markdown the pull request is commented with, so no arithmetic
-lives in the YAML. Both jobs need no secrets and no network beyond the package index, so
+gate compares the nine cases in `scripts/bench/bench_plugin_system.py` - ingest of a
+quarter of intraday heart rate, the anomaly scan, the read-API downsample path among them -
+with `benchmarks/baseline.json`, fails a case more than 15% past it, and writes
+`bench-results.json` (case, mean, stddev, iterations, the documented budget it fits inside,
+peak resident set, environment) plus `bench-summary.md` - the markdown the pull request is
+commented with, so no arithmetic lives in the YAML. Every case carries a documented budget
+([docs/ci.md](docs/ci.md#the-budget-each-case-has-to-fit-inside)); the measured number and
+the budget live in the same committed baseline file. Both jobs need no secrets and no network beyond the package index, so
 they run under `act`
 (`act -j coverage --artifact-server-path /tmp/artifacts`) exactly as they run on GitHub;
 without a container runtime, `./scripts/ci/post_commit.sh` runs the same gates. The

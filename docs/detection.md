@@ -246,11 +246,27 @@ listed here because they are the two a well-meaning change would cause.
   `ExerciseAttributionTradeoffTest` fails if someone rediscovers the wide net and calls it
   free.
 
-### What a scan costs
+### What a scan costs, and what it is allowed to cost
 
-The tracked benchmark case is `anomaly_detect`: **~66 days/second** on the 90-day corpus, warm-up read and evidence series included (`benchmarks/baseline.json`). That is
-the case that catches an accidental per-day re-query or a quadratic in the rules, and it is why
-the engine reads each dataset once and slices it in memory.
+Two tracked benchmark cases cover a scan, both over the same 90-day corpus in
+`benchmarks/baseline.json`:
+
+* **`anomaly_detect`** - the engine alone, warm-up read and evidence series included, in
+  days/second. This is the case that catches an accidental per-day re-query or a quadratic
+  in the rules, and it is why the engine reads each dataset once and slices it in memory.
+* **`hr_anomaly_scan`** - the whole `hr-anomaly` plugin run over the same corpus: engine,
+  coverage gate, alert policy, the prose on every alert and the metrics the run reports.
+  This is what `fm plugins run hr-anomaly --since 90d` actually costs you.
+
+Each has a documented budget of **9 days/second, i.e. a full 90-day scan under 10 s** on
+the reference runner ([docs/ci.md](ci.md#the-budget-each-case-has-to-fit-inside) holds the
+whole table), and both are currently running about seven times inside it. The gate that can
+fail a build is the 15% regression against the recorded measurement rather than the budget,
+so the number to watch in a review is the delta in `bench-summary.md`, not the headroom.
+
+Peak resident set is reported per case where the platform can measure it. A scan streams:
+it holds a day's epochs and the baselines, not the quarter, and the recorded per-case delta
+in `benchmarks/baseline.json` is the number that would move if that ever stopped being true.
 
 ## Configuring it
 

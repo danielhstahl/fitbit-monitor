@@ -189,16 +189,28 @@ instead (`tests/test_ci_post_commit.py` does).
 ## What the benchmark gate measures
 
 `scripts/bench/bench_plugin_system.py` builds a synthetic 90-day corpus in a temporary
-directory - the same corpus the store tests use - and times the five things that get
-slow silently:
+directory - the same corpus the store tests use - and times the nine things that get slow
+silently:
 
 | case | what it is | reading |
 | --- | --- | --- |
-| `seed_corpus` | writing the corpus, i.e. the ingest path | rows/sec (higher is better) |
+| `seed_corpus` | writing the corpus: the generator plus the store writer | rows/sec (higher is better) |
+| `ingest_intraday` | a quarter of intraday heart rate through the ingest pipeline (validate, one range query for duplicates, upsert) | rows/sec (higher) |
 | `scan_intraday` | the read API iterating every stored point | points/sec (higher) |
 | `downsample_to_days` | bucketing every intraday point by day | points/sec (higher) |
-| `plugin_resting_trend` | the shipped plugin run over the whole corpus | ms (lower) |
+| `hr_daily_features` | the heart-rate feature library over the whole corpus | days/sec (higher) |
+| `anomaly_detect` | the anomaly engine over the whole corpus, warm-up read included | days/sec (higher) |
+| `hr_anomaly_scan` | the shipped `hr-anomaly` plugin over the whole corpus - engine, alert policy, prose, metrics | days/sec (higher) |
+| `plugin_resting_trend` | the other shipped plugin run over the whole corpus | ms (lower) |
 | `discover_plugins` | registry discovery, validation, error isolation | ms (lower) |
+
+The two that a user actually waits for are the first and the sixth: writing a year of
+intraday data, and scanning months of heart rate for anomalies. They are the reason this
+file exists, and `ingest_intraday` and `hr_anomaly_scan` are the cases that name them
+directly rather than through a component - one ingest call with every row a real import
+would hand it, one plugin run with the alert prose and the metric emission a real run
+pays for. (The plugin run measures into a dispatcher with no sinks and no history, so a
+benchmark never writes to anybody's alert store: delivering an alert is the sink's cost.)
 
 Each case is sampled several times (nine rounds; a sub-millisecond case takes extra
 samples per round so "best" means something - the multiplier is fixed per case so a
@@ -210,6 +222,60 @@ per-point `SELECT` or a re-parse in a hot loop is caught. `tests/test_tooling.py
 the committed baseline's shape; `tests/test_ci_bench_gate.py` pins the gate and the
 workflow.
 
+### The budget each case has to fit inside
+
+A baseline is a comparison with the last accepted commit; it cannot say "this is still
+fast enough". So every case also carries a **budget**: the cost promised on the reference
+runner (the benchmark job's `ubuntu-latest` runner on CPython 3.14), stated once in
+`BUDGETS` in the harness, written in this file, recorded in `benchmarks/baseline.json`
+next to the measurement it is checked against, and printed in both reports.
+
+| case | budget | the same number as something a person waits for |
+| --- | --- | --- |
+| `seed_corpus` | ≥ 50,000 rows/sec | writing a 90-day corpus finishes inside 10 s |
+| `ingest_intraday` | ≥ 50,000 rows/sec | ingesting 90 days of intraday heart rate takes under 10 s |
+| `scan_intraday` | ≥ 100,000 points/sec | scanning 90 days of intraday points takes under 1 s |
+| `downsample_to_days` | ≥ 100,000 points/sec | downsampling 90 days of intraday points takes under 1 s |
+| `hr_daily_features` | ≥ 50 days/sec | a 90-day feature pass takes under 2 s |
+| `anomaly_detect` | ≥ 9 days/sec | a full 90-day anomaly scan finishes under 10 s |
+| `hr_anomaly_scan` | ≥ 9 days/sec | a 90-day hr-anomaly run finishes under 10 s, alerts included |
+| `plugin_resting_trend` | ≤ 500 ms | a 90-day resting-trend run takes under half a second |
+| `discover_plugins` | ≤ 50 ms | plugin discovery stays under a twentieth of a second |
+
+Three things hold these together instead of a promise in prose: the harness **refuses to
+build a case that has no budget** here, the three lists (code, this table,
+`benchmarks/baseline.json`) are compared name-by-name in `tests/test_ci_bench_gate.py`,
+and a re-recorded baseline whose measured number breaks a budget fails that same test.
+
+A breach is *reported* - `budget_met: false` alongside the `budget` number in
+`bench-results.json`, a `✗` in the summary table, a `BUDGET` line on the console - and
+is not a second gate. A budget is written for one machine and a build runs on whichever
+runner was free, so turning the reference promise into a red X would be a machine
+lecturing a human about hardware it never agreed to. The gate that can fail a build is
+the 15% regression, which is the same comparison on the same hardware both times.
+
+Budgets are loose on purpose - `anomaly_detect` records about 65 days/sec against a
+budget of 9, a sevenfold margin. A budget is the number that says "the
+product is still usable", and the baseline gate is the number that says "this commit made
+it 20% worse than the last one"; the second one bites first, and by a lot.
+
+### Peak memory, where it can be measured
+
+Every case also reports **peak resident set**: `peak_rss_mib`, sampled from
+`/proc/self/statm` on a daemon thread while that case's rounds run, and
+`peak_rss_delta_mib`, what the case added on top of where it started. The delta is the
+diagnostic one - "the scan now holds every reading in memory" is a memory jump of a
+hundred megabytes and not a slowdown of 40 ms. Where `/proc` is not there, the probe falls
+back to `ru_maxrss`, which is a process-wide high-water mark and therefore a floor for a
+single case rather than a reading, and where neither answers the reports print
+`null` and say so rather than inventing a zero.
+
+Memory is measured and never gated, for the same reason the budget is not: how much a case
+holds is a property of the container it ran in as much as of the code, and a limit is a
+deployment fact. It is in `bench-results.json` per case, in a Peak RSS table in
+`bench-summary.md`, and in the `memory` block of `benchmarks/baseline.json`, so the
+question "when did the memory jump?" has an answer with a commit on it.
+
 The reports do not stop at the number that gated. Every case also carries `mean`,
 `stddev` and `iterations`, which is how you tell a real 12% regression from a run where
 the machine was busy - and the environment the numbers came from (interpreter, OS, CPU
@@ -219,8 +285,9 @@ number without its environment is a rumour.
 ## Refreshing the baseline - on purpose, in a diff
 
 The baseline is committed JSON at `benchmarks/baseline.json`: one entry per case with
-its unit and direction, the sample statistics from the recording, and the environment
-that produced it. It is written by exactly one command, and by nobody automatically:
+its unit, its direction and its documented budget, the sample statistics from the
+recording, the peak resident set each case ran to, and the environment that produced all
+of it. It is written by exactly one command, and by nobody automatically:
 
 ```bash
 ./scripts/dev/bench.sh --update-baseline
@@ -278,15 +345,23 @@ key is real, `samples` is every reading taken):
   "environment": { "python": "3.14.5", "machine": "x86_64", "cpu_count": 8,
                    "memory_gib": 16.0, "git": { "short": "1a2b3c4", "dirty": false } },
   "notes": [],
+  "memory": { "method": "proc_self_statm", "peak_rss_mib": 62.2,
+              "process_peak_rss_mib": 61.9 },
   "cases": [
     { "case": "scan_intraday", "what": "read API over every stored point",
       "unit": "points/sec", "direction": "higher", "iterations": 9,
       "mean": 571993.5, "stddev": 8756.8, "best": 578638.2, "worst": 550564.8,
       "gate_value": 578638.2, "baseline": 578638.2, "delta_percent": 0.0,
-      "regression_percent": 0.0, "tracked": true, "status": "ok", "samples": [ ... ] }
+      "regression_percent": 0.0, "tracked": true, "status": "ok",
+      "budget": 100000.0, "budget_note": "scanning 90 days of intraday points takes under 1 s",
+      "budget_met": true, "peak_rss_mib": 57.4, "peak_rss_delta_mib": 0.0,
+      "rss_method": "proc_self_statm", "samples": [ ... ] }
   ],
   "regressions": [],
-  "gate": { "gated": true, "passed": true, "tracked_cases": 5,
+  "budgets": { "documented": 9, "met": 9, "breached": [], "breaches": [],
+               "gated": false,
+               "reference_runner": "the benchmark job's ubuntu-latest runner, CPython 3.14" },
+  "gate": { "gated": true, "passed": true, "tracked_cases": 9,
             "regressed_cases": [], "untracked_cases": [], "tolerance_percent": 15.0 }
 }
 ```

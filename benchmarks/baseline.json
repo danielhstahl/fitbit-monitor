@@ -1,19 +1,45 @@
 {
+  "budget_notes": {
+    "anomaly_detect": "a full 90-day anomaly scan finishes under 10 s",
+    "discover_plugins": "plugin discovery stays under a twentieth of a second",
+    "downsample_to_days": "downsampling 90 days of intraday points takes under 1 s",
+    "hr_anomaly_scan": "a 90-day hr-anomaly run finishes under 10 s, alerts included",
+    "hr_daily_features": "a 90-day feature pass takes under 2 s",
+    "ingest_intraday": "ingesting 90 days of intraday heart rate takes under 10 s",
+    "plugin_resting_trend": "a 90-day resting-trend run takes under half a second",
+    "scan_intraday": "scanning 90 days of intraday points takes under 1 s",
+    "seed_corpus": "writing a 90-day corpus finishes inside 10 s"
+  },
+  "budgets": {
+    "anomaly_detect": 9.0,
+    "discover_plugins": 50.0,
+    "downsample_to_days": 100000.0,
+    "hr_anomaly_scan": 9.0,
+    "hr_daily_features": 50.0,
+    "ingest_intraday": 50000.0,
+    "plugin_resting_trend": 500.0,
+    "scan_intraday": 100000.0,
+    "seed_corpus": 50000.0
+  },
   "cases": {
-    "anomaly_detect": 65.724,
-    "discover_plugins": 1.136,
-    "downsample_to_days": 416002.617,
-    "hr_daily_features": 204.306,
-    "plugin_resting_trend": 6.115,
-    "scan_intraday": 563610.223,
-    "seed_corpus": 126411.762
+    "anomaly_detect": 65.324,
+    "discover_plugins": 1.19,
+    "downsample_to_days": 378601.526,
+    "hr_anomaly_scan": 63.921,
+    "hr_daily_features": 199.727,
+    "ingest_intraday": 114892.477,
+    "plugin_resting_trend": 6.176,
+    "scan_intraday": 488970.444,
+    "seed_corpus": 119890.385
   },
   "days": 90,
   "direction": {
     "anomaly_detect": "higher",
     "discover_plugins": "lower",
     "downsample_to_days": "higher",
+    "hr_anomaly_scan": "higher",
     "hr_daily_features": "higher",
+    "ingest_intraday": "higher",
     "plugin_resting_trend": "lower",
     "scan_intraday": "higher",
     "seed_corpus": "higher"
@@ -22,9 +48,9 @@
     "cpu_count": 8,
     "git": {
       "branch": "master",
-      "commit": "37c9cf2f7a1605f30f39110b1d24da2a30800ce8",
+      "commit": "0e43e05ebf4e448ced9b9508b1bccc1373ed2a0d",
       "dirty": true,
-      "short": "37c9cf2"
+      "short": "0e43e05"
     },
     "hostname": "a10f4c2f2276",
     "implementation": "CPython",
@@ -36,56 +62,97 @@
     "release": "7.0.14-linuxkit",
     "system": "Linux"
   },
-  "recorded_utc": "2026-11-23T15:58:34+00:00",
+  "memory": {
+    "method": "proc_self_statm",
+    "peak_rss_delta_mib_per_case": {
+      "anomaly_detect": 2.46,
+      "discover_plugins": 0.0,
+      "downsample_to_days": 0.0,
+      "hr_anomaly_scan": 2.58,
+      "hr_daily_features": 0.7,
+      "ingest_intraday": 4.64,
+      "plugin_resting_trend": 0.01,
+      "scan_intraday": 0.0,
+      "seed_corpus": 11.51
+    },
+    "peak_rss_mib": 62.3,
+    "peak_rss_mib_per_case": {
+      "anomaly_detect": 59.72,
+      "discover_plugins": 62.3,
+      "downsample_to_days": 56.57,
+      "hr_anomaly_scan": 62.3,
+      "hr_daily_features": 57.27,
+      "ingest_intraday": 61.19,
+      "plugin_resting_trend": 62.3,
+      "scan_intraday": 56.57,
+      "seed_corpus": 58.65
+    },
+    "process_peak_rss_mib": 61.74
+  },
+  "recorded_utc": "2026-11-23T21:50:44+00:00",
   "stats": {
     "anomaly_detect": {
-      "best": 65.724,
+      "best": 65.324,
       "iterations": 9,
-      "mean": 64.626,
-      "stddev": 1.024,
-      "worst": 62.808
+      "mean": 62.721,
+      "stddev": 1.889,
+      "worst": 59.004
     },
     "discover_plugins": {
-      "best": 1.136,
+      "best": 1.19,
       "iterations": 180,
-      "mean": 1.184,
-      "stddev": 0.07,
-      "worst": 1.898
+      "mean": 1.447,
+      "stddev": 1.294,
+      "worst": 11.364
     },
     "downsample_to_days": {
-      "best": 416002.617,
+      "best": 378601.526,
       "iterations": 9,
-      "mean": 411229.389,
-      "stddev": 10319.719,
-      "worst": 383869.711
+      "mean": 351502.534,
+      "stddev": 42541.138,
+      "worst": 255623.36
+    },
+    "hr_anomaly_scan": {
+      "best": 63.921,
+      "iterations": 9,
+      "mean": 61.372,
+      "stddev": 1.426,
+      "worst": 59.247
     },
     "hr_daily_features": {
-      "best": 204.306,
+      "best": 199.727,
       "iterations": 9,
-      "mean": 202.72,
-      "stddev": 1.736,
-      "worst": 198.938
+      "mean": 190.268,
+      "stddev": 9.021,
+      "worst": 174.887
+    },
+    "ingest_intraday": {
+      "best": 114892.477,
+      "iterations": 9,
+      "mean": 104083.94,
+      "stddev": 10847.853,
+      "worst": 81045.042
     },
     "plugin_resting_trend": {
-      "best": 6.115,
+      "best": 6.176,
       "iterations": 45,
-      "mean": 6.309,
-      "stddev": 0.231,
-      "worst": 7.472
+      "mean": 7.42,
+      "stddev": 2.93,
+      "worst": 16.757
     },
     "scan_intraday": {
-      "best": 563610.223,
+      "best": 488970.444,
       "iterations": 9,
-      "mean": 553410.438,
-      "stddev": 9457.793,
-      "worst": 533470.863
+      "mean": 463831.577,
+      "stddev": 34108.01,
+      "worst": 403548.034
     },
     "seed_corpus": {
-      "best": 126411.762,
+      "best": 119890.385,
       "iterations": 9,
-      "mean": 124434.135,
-      "stddev": 1274.009,
-      "worst": 122345.436
+      "mean": 112312.421,
+      "stddev": 5800.777,
+      "worst": 103518.124
     }
   },
   "tolerance_percent": 15.0,
@@ -93,7 +160,9 @@
     "anomaly_detect": "days/sec",
     "discover_plugins": "ms",
     "downsample_to_days": "points/sec",
+    "hr_anomaly_scan": "days/sec",
     "hr_daily_features": "days/sec",
+    "ingest_intraday": "rows/sec",
     "plugin_resting_trend": "ms",
     "scan_intraday": "points/sec",
     "seed_corpus": "rows/sec"

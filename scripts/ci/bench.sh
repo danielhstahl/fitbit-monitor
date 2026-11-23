@@ -7,9 +7,10 @@
 # over a synthetic corpus - and writes two reports:
 #
 #   bench-results.json   case, mean, stddev, iterations, the value that gated, the
-#                        baseline behind it, and an environment summary
-#   bench-summary.md     the same numbers as a table, for the PR comment and the job
-#                        summary
+#                        baseline behind it, the documented budget it fits inside, the
+#                        peak resident set it ran to, and an environment summary
+#   bench-summary.md     the same numbers as a table (plus the peak RSS table), for the
+#                        PR comment and the job summary
 #
 # and it ends by naming both, the way the coverage gate does:
 #

@@ -3,7 +3,9 @@ name: Benchmarks
 # The perf gate. Ingestion throughput and a plugin scan over months of intraday heart
 # rate are the numbers that get slow silently, so this job runs the committed benchmark
 # suite against the committed baseline (benchmarks/baseline.json) and fails on a
-# regression past the tolerance.
+# regression past the tolerance. Each case also carries a documented budget - a 90-day
+# scan under 10 s, and so on - which is recorded and reported there too, so a number that
+# passes its baseline and misses its promise is visible rather than quiet.
 #
 # Everything about the measurement lives in scripts/ci/bench.sh: this file has no
 # benchmark logic, no arithmetic, no formatting and no secret - it calls the script,
@@ -36,7 +38,7 @@ concurrency:
 
 jobs:
   benchmark:
-    name: Plugin system vs baseline
+    name: Ingest, scan and plugins vs baseline
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
