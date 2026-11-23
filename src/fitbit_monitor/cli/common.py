@@ -32,6 +32,11 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_NO_STORE = 4
+#: The configured upstream source is retired, so the command was refused before it could
+#: spend anything. Distinct from EXIT_USAGE and EXIT_ERROR because the usual reading of a
+#: failed API command - "go and log in again" - is wrong here and sends the user in a
+#: circle: a retired host answers 401 forever. See ``fm api source``.
+EXIT_SOURCE = 6
 #: A command that is in the parser, documented, and does nothing yet. Distinct from
 #: EXIT_ERROR on purpose: "you asked for a thing this build does not have" is not the
 #: same failure as "the thing ran and failed", and a script must be able to tell them.
@@ -247,6 +252,7 @@ __all__ = [
     "EXIT_NOT_IMPLEMENTED",
     "EXIT_NO_STORE",
     "EXIT_OK",
+    "EXIT_SOURCE",
     "EXIT_USAGE",
     "Session",
     "add_common_args",

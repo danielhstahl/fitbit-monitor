@@ -14,6 +14,13 @@ no network and no secrets:
 Keeping the transports this dumb is deliberate: retries, rate limits and ETags live
 in :mod:`fitbit_monitor.api.client`, so they are exercised against the replay
 transport exactly as they are against the live API.
+
+Each transport also answers one question about itself - ``live``, "can this thing reach
+the public internet" - because that is what decides whether the retired-source guard in
+:mod:`fitbit_monitor.api.source` applies. Only :class:`UrllibTransport` can, so only it
+says yes; a replay directory, and any transport a test hands in, says no and keeps its
+freedom to talk to a stand-in. A transport that does not answer at all is read as not
+live, which is the safe direction: it is a stand-in by construction.
 """
 
 from __future__ import annotations
@@ -110,6 +117,9 @@ class ReplayTransport:
     than at 3am against the live API.
     """
 
+    #: Nothing here reaches a host, so the retired-source guard does not apply to it.
+    live = False
+
     def __init__(self, fixtures: Path | Mapping[str, dict], *, base_url: str = "https://api.fitbit.com") -> None:
         self.base_url = base_url.rstrip("/")
         self.fixtures = load_fixtures(Path(fixtures)) if not isinstance(fixtures, Mapping) else dict(fixtures)
@@ -159,6 +169,11 @@ class RecordingTransport:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.recorded: list[str] = []
 
+    @property
+    def live(self) -> bool:
+        """Recording over the real API is live; recording over a stand-in is not."""
+        return bool(getattr(self.inner, "live", False))
+
     def request(
         self,
         method: str,
@@ -191,6 +206,11 @@ class RecordingTransport:
 
 class UrllibTransport:
     """The real transport: stdlib ``urllib``, no third-party HTTP library."""
+
+    #: The only transport in this module that can reach a host on the internet, which is
+    #: what makes it the one the retired-source guard binds.
+    live = True
+
 
     def __init__(self, *, timeout: float = 30.0, opener: Any = None) -> None:
         self.timeout = timeout

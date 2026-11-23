@@ -13,6 +13,11 @@ The transports in :mod:`fitbit_monitor.api.http` are what keeps all of this test
 :class:`~fitbit_monitor.api.http.ReplayTransport` answers from recorded fixtures and
 refuses anything unrecorded, so the whole import path runs offline in CI with no
 secrets and no internet.
+
+:mod:`fitbit_monitor.api.source` is the one that knows *which* upstream host that is, that
+the legacy Fitbit Web API was switched off on 2026-11-02, and that dialling it anyway
+only produces a ``401`` that looks like a bad login. It refuses retired endpoints before
+they are dialled and answers "is anything there?" when asked.
 """
 
 from __future__ import annotations
@@ -27,12 +32,26 @@ from .errors import (
     NotAuthenticatedError,
     RateLimitError,
     ReplayMissError,
+    SourceRetiredError,
 )
 from .http import RecordingTransport, ReplayTransport, Response, UrllibTransport
+from .source import (
+    DECIDED_BASE_URL,
+    DECISION_DOC,
+    LEGACY_SUNSET,
+    SourceState,
+    check_alive,
+    guard,
+    is_retired_host,
+    state_of,
+)
 
 __all__ = [
     "ALL_SCOPES",
     "CATALOG",
+    "DECIDED_BASE_URL",
+    "DECISION_DOC",
+    "LEGACY_SUNSET",
     "APIUnavailableError",
     "CredentialStore",
     "CredentialsExpiredError",
@@ -49,12 +68,18 @@ __all__ = [
     "ReplayTransport",
     "Request",
     "Response",
+    "SourceRetiredError",
+    "SourceState",
     "TokenSet",
     "UrllibTransport",
+    "check_alive",
     "exchange_code",
+    "guard",
+    "is_retired_host",
     "lookup",
     "permitted_datasets",
     "pkce_challenge",
     "refresh",
     "resolve_names",
+    "state_of",
 ]

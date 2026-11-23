@@ -17,6 +17,7 @@ import argparse
 import os
 
 from ..api.catalog import ALL_SCOPES
+from ..api.source import WORKING_TODAY, state_of
 from ..config import ApiSettings
 from ..errors import UsageError
 from pathlib import Path
@@ -29,10 +30,19 @@ STARTER = """\
 [store]
 path = "{store}"
 
-# Register an app at https://dev.fitbit.com/apps/new and paste its credentials here.
-# Fitbit compares the redirect URI exactly: register this one, character for character,
-# as the app's "Redirect URI" - scheme, host, port and trailing slash included.
+# THE API PATH IS BLOCKED TODAY, AND THIS IS THE REASON (2026-11-23).
+# The decided source is the Google Health API (docs/adr/0002-health-api-source.md); the
+# client in this build still speaks the legacy Fitbit Web API dialect, which Google
+# switched off on 2026-11-02 - it answers 401 and returns no data. `fm api source` says
+# as much in one line. Everything below is what you will need when the port in that ADR's
+# section 10 lands: create a Google Cloud project in Personal mode, enable the Google
+# Health API, create an OAuth client, paste its credentials here. The redirect URI has to
+# be registered exactly as printed below - scheme, host, port and trailing slash included
+# (a loopback URI like this one is allowed for a local tool).
 #   {redirect}
+#
+# None of it is needed for the source that works today:
+#   fm import --source csv --path ~/Downloads/takeout.zip
 [api]
 client_id = ""
 client_secret = ""
@@ -116,15 +126,19 @@ def cmd_config_init(args: argparse.Namespace, session: Session) -> int:
         return EXIT_OK
     print(f"wrote {path} (mode 0600)")
     print("\nnext:")
-    print(f"  1. register an app at https://dev.fitbit.com/apps/new with redirect URI {session.config.api.redirect_uri}")
-    print(f"  2. paste the client id and secret into [api] in {path}")
-    print("  3. fm auth login")
+    print("  1. today, with no API and no credentials:")
+    print("       fm import --source csv --path ~/Downloads/takeout.zip")
+    print("  2. the API path is blocked until the port lands - `fm api source` says why, and")
+    print("     docs/adr/0002-health-api-source.md section 10 is the port")
+    print(f"  3. when it lands: register the OAuth client with redirect URI {session.config.api.redirect_uri},")
+    print(f"     paste its client id and secret into [api] in {path}, then `fm auth login`")
     return EXIT_OK
 
 
 def cmd_config_show(args: argparse.Namespace, session: Session) -> int:
     config = session.config
     import_settings = config.import_
+    source = state_of(config.api)
     payload = {
         "config_path": str(session.paths.config),
         "config_present": session.paths.config.exists(),
@@ -137,6 +151,7 @@ def cmd_config_show(args: argparse.Namespace, session: Session) -> int:
         "plugin_dirs": [str(p) for p in config.plugin_dirs],
         "plugins": sorted(config.plugin_sections),
         "api": config.api.redacted(),
+        "source": source.as_dict(),
         "import": {
             "timezone": import_settings.timezone,
             "recent_days": import_settings.recent_days,
@@ -157,6 +172,9 @@ def cmd_config_show(args: argparse.Namespace, session: Session) -> int:
     print(f"reports:  {payload['imports_dir']}")
     api = config.api
     print(f"api:      client_id={api.client_id or '(not set)'} redirect_uri={api.redirect_uri}")
+    print(f"source:   {source.short()}")
+    if source.is_retired:
+        print(f"          {WORKING_TODAY}")
     print(f"import:   timezone={import_settings.timezone} recent_days={import_settings.recent_days} "
           f"chunk_days={dict(import_settings.chunk_days) or '-'}")
     return EXIT_OK

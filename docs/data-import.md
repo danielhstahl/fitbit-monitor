@@ -17,16 +17,41 @@ The token file is written `0600` and **refused at read time** if anything widene
 the whole account. `fm config path` prints every resolved location if a store or a
 token file is not where you expected.
 
-> **Which API, and its status (2026-11-22).** The decided source is the **Google Health
-> API** at `https://health.googleapis.com/v4`, with the export archive as an equal
-> first-class source; the whole decision, its sources and its dates are
+> **Which API, and its status (2026-11-22, behaviour added 2026-11-23).** The decided source
+> is the **Google Health API** at `https://health.googleapis.com/v4`, with the export
+> archive as an equal first-class source; the whole decision, its sources and its dates are
 > [ADR-0002](adr/0002-health-api-source.md). The client code in `src/fitbit_monitor/api/`
 > still speaks the **legacy Fitbit Web API** dialect (`api.fitbit.com`, `/1/user/-/…`,
-> `X-RateLimit-*`), which Google turned off on **2026-11-02**: those endpoints answer
-> `401` and return no data, so a real `fm auth login` / `fm import` run cannot work
-> until the port in ADR-0002 section 10 lands. Nothing below changes shape in that port -
+> `X-RateLimit-*`), which Google turned off on **2026-11-02**: those endpoints return no
+> data, so a real `fm auth login` / `fm import` run cannot work until the port in ADR-0002
+> section 10 lands. Nothing below changes shape in that port -
 > same commands, same datasets, same report - only the host, the endpoints and the
 > arithmetic in [Planning before spending](#planning-before-spending).
+>
+> Because the dead endpoints answer `401`, and `401` is what a stale token looks like, the
+> commands that would dial them now **refuse first**: `fm import`, `fm api probe` and
+> `fm auth login` exit **6** naming the date and the alternative rather than spending
+> requests to be told to run `fm auth login` forever. `fm api source` is the answer to
+> "what am I pointed at, and is it still there?":
+>
+> ```console
+> $ fm api source --verify
+> configured source   retired (Fitbit Web API, off 2026-11-02)
+>   base_url           https://api.fitbit.com   <- retired
+>   token_url          https://api.fitbit.com/oauth2/token   <- retired
+>   decided instead    Google Health API  https://health.googleapis.com/v4
+>   decision           docs/adr/0002-health-api-source.md (section 10 is the port)
+>   works today        `fm import --source csv --path ARCHIVE` (Google Takeout) needs no API at all
+>
+> live check (no credentials, 3 requests)
+>   legacy api             401  UNAUTHENTICATED          alive
+>   legacy oauth           200                           renders
+>   decided api            401  UNAUTHENTICATED CREDENTIALS_MISSING alive
+> ```
+>
+> The `live check` needs no token and no client id, and flags anything that has drifted from
+> what ADR-0002 measured - a host that has started answering `410`, or a data endpoint that
+> answers a stranger with `200`, are both reasons to re-read that ADR.
 
 ## What "imported" means
 
@@ -129,6 +154,7 @@ Failures are per dataset, and the run reports *partial* rather than pretending:
 
 | symptom | report | exit |
 |---|---|---|
+| the source in `[api]` was switched off (today: the Fitbit Web API) | refused before any request, with the date and the alternative | 6 |
 | one dataset 403s (scope, or no SpO2 on the account) | that dataset `failed`, the rest `ok` | 3 |
 | a day genuinely has no data (404) | `info` note on the dataset, still `ok` | 0 |
 | payload is not JSON / a row is unusable | counted in `quarantined`, body kept | 5 |
@@ -191,7 +217,8 @@ It is read-only, bounded by `--max-requests` (default 60 - a probe is a diagnost
 backfill), and `--json` prints the same report as one object for a script or for
 `fm doctor --probe`. The exit code follows `fm import`: **0** every dataset the catalog
 knows answered with data, **5** some did not, **1** nothing did, **2** there was no token
-to ask with. `fm api probe --fixtures DIR` rehearses the whole thing offline.
+to ask with, **6** the source itself is retired and nothing was asked. `fm api probe
+--fixtures DIR` rehearses the whole thing offline.
 
 ## Backfilling from an export archive
 
@@ -219,8 +246,10 @@ date as usual.
 
 ```toml
 [api]
-base_url = "https://api.fitbit.com"   # the only host data is sent to (ADR-0002 §10
-                                      # changes this default to health.googleapis.com)
+base_url = "https://api.fitbit.com"   # retired: fm refuses to dial this host (exit 6).
+                                      # ADR-0002 §10 changes the default to
+                                      # health.googleapis.com/v4; any other host is
+                                      # dialled as configured.
 client_id = "..."
 redirect_port = 55432
 timeout = 30.0
@@ -247,8 +276,10 @@ commented starting point.
 instead of calling the network - the same mechanism the test suite uses
 (`tests/fixtures/api`, recorded by `scripts/dev/record_fixtures.py`). It is useful
 for rehearsing an expensive import, and it means the import tests, and this
-document's examples, run offline. `fm auth login --fixtures` and `--manual` cover
-the headless-machine case.
+document's examples, run offline. Replay is offline by definition, so the
+retired-source refusal does not apply to it: `fm import --fixtures tests/fixtures/api`
+lands rows today. `fm auth login --manual` covers the headless-machine case; the
+fixture transport is picked up from `FM_FIXTURES`.
 
 ## See also
 

@@ -27,6 +27,7 @@ from fitbit_monitor.cli.common import (
     EXIT_NOT_IMPLEMENTED,
     EXIT_NO_STORE,
     EXIT_OK,
+    EXIT_SOURCE,
     EXIT_USAGE,
 )
 from fitbit_monitor.store.writer import SeriesStore
@@ -814,7 +815,7 @@ class CommandSurfaceTest(CliTestCase):
     def test_bare_import_says_what_is_missing_instead_of_traceback(self) -> None:
         """`fm import` with nothing set up fails as a report, not as a stack trace."""
         code, text = self.fm("import")
-        self.assertIn(code, (EXIT_ERROR, EXIT_USAGE, EXIT_NO_STORE), text)
+        self.assertIn(code, (EXIT_ERROR, EXIT_USAGE, EXIT_NO_STORE, EXIT_SOURCE), text)
         self.assertTrue(text.strip(), "a refused command should say why")
         self.assertNotIn("Traceback", text)
 

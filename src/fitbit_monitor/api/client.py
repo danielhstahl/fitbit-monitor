@@ -16,6 +16,10 @@ here is a surprise to the caller:
   ``fm auth login``.
 * **ETags** are cached on disk, so re-importing an overlapping window costs 304s
   instead of full payloads.
+* **A retired host is refused, not dialled.** ``[api] base_url`` pointing at the Fitbit
+  Web API - switched off on 2026-11-02, still answering ``401`` - raises
+  :class:`~fitbit_monitor.api.errors.SourceRetiredError` before the request rather than
+  returning an answer that reads like a bad login. See :mod:`fitbit_monitor.api.source`.
 """
 
 from __future__ import annotations
@@ -26,16 +30,18 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from ..config import ApiSettings, ImportSettings
 from ..timeutil import utcnow
+from . import source as source_state
 from .auth import CredentialStore, TokenSet, refresh
 from .errors import (
     CredentialsExpiredError,
     HTTPError,
     NotAuthenticatedError,
     RateLimitError,
+    SourceRetiredError,
 )
 from .http import Response, UrllibTransport
 
@@ -127,7 +133,41 @@ class FitbitClient:
         self.rate_limit = RateLimit()
         self.requests = 0
         self.not_modified = 0
+        #: Whether this client's transport can reach a real host (see :mod:`.http`), and
+        #: therefore what the retired-source guard in :mod:`.source` binds.
+        self.live = bool(getattr(self.transport, "live", False))
+        # Computed once: an import makes thousands of requests against the same three
+        # endpoints, and re-parsing them per request would be pure overhead on the hot path.
+        self._guard_state = source_state.state_of(self.api, settings=source_state.DATA_PLANE_SETTINGS)
         self._tokens: TokenSet | None = self.credentials.load_or_none()
+
+    def guard_source(self, *, extra: Sequence[str] = ()) -> None:
+        """Refuse to dial a host that was switched off. Raises :class:`SourceRetiredError`.
+
+        Called before a request goes out, never in the constructor: a client may exist
+        purely to read state (``fm auth status``, ``fm doctor``) and those commands should
+        report the retirement, not fail with it. Only a live transport is guarded, so
+        ``--fixtures`` replay and the test suite keep working.
+
+        ``extra`` names a URL that is not in ``[api]`` and is about to be dialled (a token
+        endpoint handed in by an argument). The ``[api]`` data-plane endpoints - the API
+        and the token endpoint, which is all a client that already holds a token dials -
+        are checked from the state computed at construction.
+        """
+        state = self._guard_state
+        if not self.live:
+            return
+        retired = state.retired + tuple(
+            ("endpoint", url) for url in extra if source_state.is_retired_host(url)
+        )
+        if retired:
+            raise SourceRetiredError(
+                source_state.SourceState(source_state.STATE_RETIRED, state.endpoints, tuple(retired)).reason()
+            )
+
+    def source_state(self) -> source_state.SourceState:
+        """What ``[api]`` points at, including the consent page: the whole configuration."""
+        return source_state.state_of(self.api)
 
     # --- credentials --------------------------------------------------------
     @property
@@ -157,6 +197,9 @@ class FitbitClient:
         if not force and not tokens.needs_refresh(self.clock()):
             log.debug("access token still valid (expires %s)", tokens.expires_at.isoformat(timespec="seconds"))
             return tokens
+        # A retired token endpoint cannot issue a token, and saying "re-consent" about a
+        # service that issues nothing is the loop this guard exists to break.
+        self.guard_source()
         log.debug("refreshing the access token (%s)", "API said 401" if force else "expired or nearly so")
         try:
             refreshed = refresh(
@@ -181,6 +224,7 @@ class FitbitClient:
 
     def post_form(self, url: str, fields: Mapping[str, str], *, headers: Mapping[str, str] | None = None) -> Response:
         """Form POST, used for the token endpoints (which are not versioned APIs)."""
+        self.guard_source(extra=(url,))
         body = urllib.parse.urlencode(dict(fields)).encode("ascii")
         merged = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
         merged.update(dict(headers or {}))
@@ -191,6 +235,7 @@ class FitbitClient:
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> Response:
         """GET ``path`` (relative to ``[api] base_url``), with the politeness rules applied."""
         url = self._url(path, params)
+        self.guard_source()
         cache_key = url
         attempts = max(1, int(self.api.retries) + 1)
         refreshed = False

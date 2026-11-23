@@ -1,4 +1,13 @@
-"""``fm api probe`` - why an import lands nothing, asked of the API instead of the logs.
+"""``fm api`` - asking the API side of this install two different questions.
+
+``fm api probe`` asks **what this account allows**: granted scopes, which datasets answer,
+the rate limit in force, and the earliest date of data available per dataset.
+
+``fm api source`` asks **whether there is an API to ask**: which host ``[api]`` points at,
+whether that host is still a service at all, and - with ``--verify`` - what it says today,
+without credentials.
+
+## fm api probe
 
 One command, four answers, all of them about the account behind the stored token:
 
@@ -27,8 +36,16 @@ from __future__ import annotations
 import argparse
 from datetime import date, timedelta
 
-from ..api.errors import NotAuthenticatedError
+from ..api.errors import NotAuthenticatedError, SourceRetiredError
 from ..api.probe import DEFAULT_MAX_REQUESTS, run_probe
+from ..api.source import (
+    DECIDED_BASE_URL,
+    DECIDED_NAME,
+    DECISION_DOC,
+    UNREACHABLE,
+    WORKING_TODAY,
+    check_alive,
+)
 from ..errors import UsageError
 from ..timeutil import parse_date_arg
 from .common import EXIT_USAGE, Session, is_day_only, print_json
@@ -63,7 +80,7 @@ see also: fm auth status --probe, fm import --dry-run, fm doctor --probe
 def register(sub: "argparse._SubParsersAction") -> None:
     api = sub.add_parser(
         "api",
-        help="ask the live API what this account allows (probe)",
+        help="ask the API side of this install: what it allows (probe), whether it is alive (source)",
         description="Inspect the API side of this install.",
     )
     asub = api.add_subparsers(dest="api_command", required=True)
@@ -110,11 +127,32 @@ def register(sub: "argparse._SubParsersAction") -> None:
     probe.add_argument("--json", action="store_true", help="print the report as one JSON object")
     probe.set_defaults(func=cmd_api_probe)
 
+    source = asub.add_parser(
+        "source",
+        help="report which health API this build dials, and whether that host is still a service",
+        description=SOURCE_DESCRIPTION,
+        epilog=SOURCE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    source.add_argument(
+        "--verify",
+        action="store_true",
+        help="ask each host live, with no credentials (three requests, no token and no client id needed)",
+    )
+    source.add_argument("--json", action="store_true", help="print the report as one JSON object")
+    source.set_defaults(func=cmd_api_source)
+
 
 def cmd_api_probe(args: argparse.Namespace, session: Session) -> int:
     client = session.api_client(fixtures=args.fixtures)
+    try:
+        client.guard_source()
+    except SourceRetiredError as exc:
+        # A retired host is not an API answer, so the "never raise" rule of the probe does
+        # not cover it: asking it four questions would produce four 401s and no diagnosis.
+        return _cannot_probe(args, exc.message, hint=exc.hint, code=exc.exit_code)
     if not client.authenticated:
-        return _cannot_probe(args, "no stored credentials")
+        return _cannot_probe(args, "no stored credentials", authenticated=False)
     since, until = _window(args)
     try:
         report = run_probe(
@@ -150,16 +188,18 @@ def _window(args: argparse.Namespace) -> tuple[date | None, date | None]:
     return since, until
 
 
-def _cannot_probe(args: argparse.Namespace, reason: str) -> int:
-    """No token to ask with: say so in the requested shape, and use the auth exit code."""
-    hint = "run `fm auth login` first"
+def _cannot_probe(
+    args: argparse.Namespace, reason: str, *, hint: str | None = None, code: int = EXIT_USAGE, authenticated: bool = True
+) -> int:
+    """Nothing could be asked: say so in the requested shape, with the code that fits."""
+    hint = hint or "run `fm auth login` first"
     if args.json:
         print_json(
             {
                 "tool": "fm api probe",
                 "report_version": 1,
-                "authenticated": False,
-                "exit_code": EXIT_USAGE,
+                "authenticated": authenticated,
+                "exit_code": code,
                 "error": reason,
                 "hint": hint,
             }
@@ -167,7 +207,104 @@ def _cannot_probe(args: argparse.Namespace, reason: str) -> int:
     else:
         print(f"cannot probe: {reason}")
         print(f"  {hint}")
-    return EXIT_USAGE
+    return code
 
 
-__all__ = ["DESCRIPTION", "EPILOG", "cmd_api_probe", "register"]
+SOURCE_DESCRIPTION = """\
+Report which upstream health API this build dials, and whether that host is still a service.
+
+The default [api] configuration points at the Fitbit Web API, which Google switched off on
+2026-11-02. It still answers - with 401s that look like a bad login - which is why every
+other command refuses to dial it instead of reporting a dead service as a credential
+problem. `fm import` and `fm api probe` call this same question before they spend anything.
+
+--verify asks each host what it is today. It needs no credentials, no client id and no
+token, and compares the answers with the dated measurements in ADR-0002: a host that has
+started answering 410, or a data endpoint that answers 200 to a stranger, are both events
+that re-open that decision, and both are flagged here.
+"""
+
+SOURCE_EPILOG = """\
+examples:
+  fm api source                                  what is configured, and the verdict
+  fm api source --verify                         ask the hosts now (3 requests, no credentials)
+  fm api source --json | jq '.live[] | {label, status, verdict}'
+
+exit codes:
+  0  the configured source is not a retired one
+  6  it is retired: nothing this build does against it can work
+  2  --verify reached nothing at all (check DNS/proxy), or an offline transport was asked
+
+see also: fm import --source csv, fm doctor, fm auth status
+"""
+
+
+def cmd_api_source(args: argparse.Namespace, session: Session) -> int:
+    """``fm api source``: the configured source, its verdict, and optionally the live check."""
+    client = session.api_client()
+    state = client.source_state()
+    observations: tuple = ()
+    offline_note = None
+    if args.verify:
+        if not client.live:
+            offline_note = "the transport in use is an offline replay (--fixtures); nothing was asked"
+        else:
+            observations = check_alive(client.transport)
+    code = _source_exit_code(state, observations)
+    if args.json:
+        print_json(
+            {
+                "tool": "fm api source",
+                "report_version": 1,
+                "exit_code": code,
+                **state.as_dict(),
+                "verified": bool(observations),
+                "live": [observation.as_dict() for observation in observations],
+                "note": offline_note,
+            }
+        )
+        return code
+    print(f"configured source   {state.short()}")
+    for name, url in state.endpoints:
+        mark = "   <- retired" if any(name == retired_name for retired_name, _url in state.retired) else ""
+        print(f"  {name:<18} {url}{mark}")
+    print(f"  decided instead    {DECIDED_NAME}  {DECIDED_BASE_URL}")
+    print(f"  decision           {DECISION_DOC} (section 10 is the port)")
+    print(f"  works today        {WORKING_TODAY}")
+    if args.verify:
+        if offline_note:
+            print(f"\nlive check          {offline_note}")
+        else:
+            print(f"\nlive check (no credentials, {len(observations)} requests)")
+            for observation in observations:
+                print(f"  {observation.line()}")
+            print(
+                "  verdicts describe what answered, not what works: 'alive' means it wants a\n"
+                "  credential, which the retired Fitbit host still does while issuing no tokens."
+            )
+            drifted = [o for o in observations if not o.agrees_with_adr]
+            if drifted:
+                print(f"  {len(drifted)} of {len(observations)} differ from ADR-0002's measurements: re-read it")
+    if state.is_retired:
+        print(f"\nrefused: {state.reason()}")
+    return code
+
+
+def _source_exit_code(state, observations: tuple) -> int:
+    """6 retired, 2 if a --verify reached nothing, otherwise 0."""
+    if state.is_retired:
+        return SourceRetiredError.exit_code
+    if observations and all(observation.verdict == UNREACHABLE for observation in observations):
+        return EXIT_USAGE
+    return 0
+
+
+__all__ = [
+    "DESCRIPTION",
+    "EPILOG",
+    "SOURCE_DESCRIPTION",
+    "SOURCE_EPILOG",
+    "cmd_api_probe",
+    "cmd_api_source",
+    "register",
+]

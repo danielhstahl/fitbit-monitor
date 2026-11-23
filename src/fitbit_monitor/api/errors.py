@@ -1,21 +1,59 @@
-"""Errors raised while talking to the Fitbit web API.
+"""Errors raised while talking to the health API.
 
 They all derive from :class:`FmError`, so the CLI's single ``except`` boundary keeps
-working and every command still maps a failure to an exit code. The split that
-matters to a user is *fix me* versus *wait*: an authentication failure needs
-``fm auth login``, a rate limit or a 5xx just needs a retry of the same command
-because watermarks make the work already done stick.
+working and every command still maps a failure to an exit code. The split that matters
+to a user is three-way, not two-way:
+
+* **fix me now** - authentication: ``fm auth login`` will actually help
+  (:class:`NotAuthenticatedError`, :class:`CredentialsExpiredError`);
+* **wait, then re-run** - a rate limit or a 5xx, where watermarks make the work already
+  done stick (:class:`RateLimitError`, :class:`APIUnavailableError`);
+* **no action helps** - the source itself is gone
+  (:class:`SourceRetiredError`). This one must never be confused with the first: the
+  retired Fitbit host answers ``401``, and telling somebody to log in against a service
+  that issues no tokens is a loop they can never leave.
 """
 
 from __future__ import annotations
 
 from ..errors import FmError, UsageError
 
+#: Named inline rather than imported from :mod:`fitbit_monitor.api.source`, which imports
+#: these errors - the other direction would be a cycle.
+DECISION_DOC = "docs/adr/0002-health-api-source.md"
+DECIDED_TARGET = "the Google Health API (https://health.googleapis.com/v4)"
+
 
 class FitbitAPIError(FmError):
     """Base class for anything that went wrong on the way to or from the API."""
 
     exit_code = 1
+
+
+class SourceRetiredError(FitbitAPIError):
+    """The configured source no longer exists upstream, so nothing this command does can work.
+
+    Raised *before* the request rather than after the answer, and with its own exit code
+    (**6**) so a script can tell "this endpoint is retired" from "my token needs
+    attention" - the two look identical in the API's own reply. See
+    :mod:`fitbit_monitor.api.source` for what is retired and
+    ``docs/adr/0002-health-api-source.md`` §10 for the port.
+    """
+
+    exit_code = 6  # the CLI's EXIT_SOURCE (fitbit_monitor.cli.common), kept as a literal
+    # here so the API package does not import from the CLI to name its own exit code.
+
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(
+            message,
+            hint=hint
+            or (
+                "there is no login that fixes this: the host issues no tokens any more. "
+                f"Import the Takeout archive instead - `fm import --source csv --path ARCHIVE` "
+                f"needs no API at all - and see {DECISION_DOC} section 10 for the port to "
+                f"{DECIDED_TARGET}; `fm api source --verify` shows what still answers."
+            ),
+        )
 
 
 class NotAuthenticatedError(FitbitAPIError):

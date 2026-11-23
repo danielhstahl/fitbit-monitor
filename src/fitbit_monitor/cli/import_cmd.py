@@ -25,6 +25,8 @@ Exit codes for every ``fm import`` run:
 1     nothing landed - total failure
 3     some datasets landed, some did not
 5     it landed, with warnings (quarantined payloads, bad rows)
+6     the configured API source is retired and was not dialled - see
+      ``fm api source``; ``--source csv`` still works
 130   interrupted; completed chunks are stored
 ===== ==========================================================
 """
@@ -162,6 +164,10 @@ def cmd_import(args: argparse.Namespace, session: Session) -> int:
         # Checked before the store is opened: a run that cannot authenticate should
         # not leave an empty database behind.
         client = session.api_client(fixtures=args.fixtures)
+        # Before the token check, deliberately: the retired Fitbit host answers 401, and
+        # reporting that as "log in again" is a loop with no exit. The archive source is
+        # unaffected - `--source csv` needs no API and no credentials.
+        client.guard_source()
         if not client.authenticated:
             raise NotAuthenticatedError(f"not authenticated: no credentials at {session.credentials().path}")
     try:

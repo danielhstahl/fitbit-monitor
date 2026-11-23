@@ -27,7 +27,7 @@ Nothing you did not choose, and only while an import is running:
 | request | sent | why |
 |---|---|---|
 | `fm auth login` / token refresh | your PKCE verifier and authorization code, then the refresh token | to get and renew a token; `accounts.google.com` / `oauth2.googleapis.com` once ADR-0002 §10 lands (today the code still dials the legacy Fitbit endpoints) |
-| `fm import` | `Authorization: Bearer <token>`, the date range you asked for, and an `If-None-Match` ETag when we have one | to fetch the window you named; to `[api] base_url` - the decided value is `https://health.googleapis.com/v4`, the committed default is still `https://api.fitbit.com` until ADR-0002 §10 step 2 lands |
+| `fm import` | `Authorization: Bearer <token>`, the date range you asked for, and an `If-None-Match` ETag when we have one | to fetch the window you named; to `[api] base_url` - the decided value is `https://health.googleapis.com/v4`, the committed default is still `https://api.fitbit.com` until ADR-0002 §10 step 2 lands. Since 2026-11-23 nothing at all is sent to the retired host: `fm import` refuses it with exit 6 before the first request, so "the dead API" is not a destination this program has |
 
 Plain HTTP is refused for the webhook - `https` or the loopback exception, never a
 plaintext internet hop. The API endpoints default to `https` and only change if you

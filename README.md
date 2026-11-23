@@ -27,6 +27,15 @@ anywhere except the alert webhook you configure - see
 > archive as an equal first-class source (`fm import --source csv`). The legacy Fitbit
 > Web API that the client code still targets was turned off on 2026-11-02 and returns no
 > data; that ADR's section 10 is the port.
+>
+> **Until that port lands, `fm` refuses to dial the retired host.** It answers `401`, which
+> is the one failure an import tool must not report as "log in again" - there is no login
+> that fixes a service that issues no tokens. So `fm import`, `fm api probe` and
+> `fm auth login` stop you beforehand with exit **6**, the date, and what to do instead.
+> `fm api source` is the one command that answers "which API is this, and is it still
+> there?" - with `--verify` it asks each host live, needing no token and no client id.
+> Everything else keeps working: `fm import --source csv`, `fm dev seed`, the store, the
+> plugins.
 
 ## Quickstart
 
@@ -37,6 +46,8 @@ anywhere except the alert webhook you configure - see
 ./scripts/dev/check.sh --quick      # every gate CI runs (lint, tests + coverage), minus the benchmark
 
 fm auth login                       # one-time browser consent; token stays local
+fm api source                       # is the API in your config still a service? (today: no)
+fm api source --verify              # ask each host now, with no token and no client id
 fm import --dry-run                 # what would this fetch, and at what cost
 fm import --since 2026-05-01 --until 2026-05-14    # pull two weeks
 fm import history                   # what the last runs landed
@@ -71,8 +82,9 @@ python -m pytest -q                  # the scaffolded contract suite, same one C
 
 | command | what it does |
 |---|---|
-| `fm auth login [--scopes S] [--manual CODE] [--fixtures DIR]` | OAuth2 PKCE login in the browser; token stored `0600`, refreshed on use |
+| `fm auth login [--manual CODE] [--no-browser] [--timeout S]` | OAuth2 PKCE login in the browser; token stored `0600`, refreshed on use |
 | `fm auth status [--json]` / `fm auth logout` | what is granted, and getting rid of it |
+| `fm api source [--verify] [--json]` | which API this build dials and whether that host is still a service; `--verify` asks each host live, no credentials needed |
 | `fm api probe [--dataset N] [--since D] [--until D] [--no-history] [--max-requests N] [--json]` | ask the API why an import lands nothing: granted vs wanted scopes, per-dataset data/403/404, rate-limit state, earliest date available |
 | `fm import [--since D] [--until D] [--dataset N] [--dry-run] [--json]` | pull a date range of every dataset the account allows |
 | `fm import --full-history` / `--resume` / `--retry` / `--max-requests N` | start at signup, finish an interrupted run, retry failures, bound a cron pull |
@@ -104,6 +116,7 @@ Exit codes, the same for every command:
 | 1 | a plugin errored, misconfigured itself, or timed out; or an import landed nothing |
 | 2 | bad arguments or unreadable config |
 | 4 | no local store to read - create one with `fm dev seed` |
+| 6 | the configured API source is retired and was refused before any request - `fm api source`, and `fm import --source csv` meanwhile |
 | 72 | the command exists in this build but is not implemented (`fm report`) |
 
 `fm import` adds three of its own, because "it ran" is not a useful answer for a
@@ -343,12 +356,12 @@ src/fitbit_monitor/
   store/       migrations/*.sql + runner, writer, read-only reader (coverage, gaps, raw access), raw retention,
                dataset/unit catalog, downsample, seed data, maintenance (stats, verify, export, backup, prune),
                alert history, watermarks
-  api/         http (transport, fixtures), auth (PKCE, token store), client (rate limits, ETags), catalog (endpoint shapes)
+  api/         http (transport, fixtures), auth (PKCE, token store), client (rate limits, ETags), catalog (endpoint shapes), source (which host, retired or not, refuse before dialling), probe
   ingest/      importer (plan + run), pipeline (dedupe, quarantine), csv_source (export/Takeout), report, runlog
   plugins/     contract.py models.py loader.py registry.py runner.py sinks.py scaffold.py testing.py
     builtin/   resting_trend.py - the reference metric plugin
                hr_anomaly.py       - the reference alert plugin, over anomaly/
-  cli/         common.py auth_cmd.py config_cmd.py db_cmd.py store_cmd.py import_cmd.py plugins_cmd.py alerts_cmd.py report_cmd.py doctor_cmd.py dev_cmd.py
+  cli/         common.py auth_cmd.py config_cmd.py db_cmd.py store_cmd.py import_cmd.py api_cmd.py plugins_cmd.py alerts_cmd.py report_cmd.py doctor_cmd.py dev_cmd.py
   logsecrets.py credential redaction - by shape and by value - for every log record
   logsafe.py   health-value redaction for everything that reaches a log handler
   logfmt.py    log levels (flags + FM_LOG_LEVEL), the text and JSON formatters, handler setup

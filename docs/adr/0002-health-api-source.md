@@ -6,7 +6,10 @@
   `[api]` in `config.py`, the `--source` switch in `cli/import_cmd.py`,
   `fitbit_monitor/ingest/csv_source.py`. **As of this ADR the code still speaks to the
   legacy Fitbit Web API** (`https://api.fitbit.com`, `/1/user/-/…`, `X-RateLimit-*`),
-  which returns no data (§2). §10 is the ordered list of what has to change and where.
+  which returns no data (§2). Since 2026-11-23 it *refuses* to dial that host rather than
+  dialling it and misreading the answer (`fitbit_monitor/api/source.py`, exit 6, and
+  `fm api source`), but the port is not done: §10 is the ordered list of what has to
+  change and where, with its status marked.
 - **Related:** ADR-0001 (zero runtime dependencies - it constrains every choice here),
   ADR-0003 (raw retention - the reason a source swap is not a data-loss event),
   ADR-0004 (plugins never learn which source produced a row), ADR-0005 (chunks and
@@ -383,17 +386,28 @@ Three rules, testable and therefore binding:
 ### 10. What has to change, in order
 
 Epic 2 and Epic 4 should need no further source decisions; this list is the whole
-remaining surface.
+remaining surface. **Status as of 2026-11-23:** one item has landed, and it is the one
+that stops the tool lying to its user - step 2's refusal (see the tick). Everything else
+below is still open, and step 1 gates it: the shapes in §7 have not been confirmed against
+a working Personal-mode project, and writing a client against an unverified API would
+trade a visible refusal for an invisible guess.
 
 1. **Verify Personal mode against `health.googleapis.com` once, by hand** (the only
    open assumption, §5). Record the answer in this file. Cost: one afternoon.
 2. `config.py`: `[api] base_url` default → `https://health.googleapis.com/v4`; token
    endpoint → `https://oauth2.googleapis.com/token`; scopes default list → the four
    strings from §4; **refuse** a `base_url` under `api.fitbit.com` with the sunset
-   message instead of dialling it.
+   message instead of dialling it. **Partly done 2026-11-23:** the refusal is in,
+   as :mod:`fitbit_monitor.api.source` (`guard`, called before any request by
+   `FitbitClient`, `fm import`, `fm api probe` and `fm auth login`; exit **6**,
+   `fm api source` to inspect it). The defaults are deliberately *not* flipped: until
+   step 5 lands, the paths this client builds are `/1/user/-/…` paths, and pointing
+   them at `health.googleapis.com/v4` would turn a clear refusal into a `404`.
 3. `api/auth.py`: Google authorize/token endpoints, `prompt=consent` only when scopes
    change (documented pattern), loopback redirect unchanged, `client_user_mismatch` and
-   the Testing-mode 7-day expiry mapped to distinct messages.
+   the Testing-mode 7-day expiry mapped to distinct messages. *Open.* The PKCE loopback
+   flow itself needs no change, and `fm auth login` now refuses a retired token endpoint
+   before opening the browser.
 4. `api/http.py` + `api/client.py`: local 5 req/s token bucket, `Retry-After`, jittered
    backoff on `429/503/504`, `Retry` semantics per AIP error catalog; delete the
    `X-RateLimit-*` budget or keep it as an *additional* signal.
@@ -518,6 +532,19 @@ $ date -u -Iminutes; for u in \
 
 Expected on the day this was written: `401` (legacy, but treat as dead), `401`
 (alive, wants a Google token), `200`.
+
+**Re-run 2026-11-23 from this repository, unchanged results.** The legacy host's error body
+has changed dialect since 2026-11-22: it is now Google's AIP envelope rather than Fitbit's
+- `{"error":{"code":401,"status":"UNAUTHENTICATED",…}}` - while
+`POST api.fitbit.com/oauth2/token` still answers the old `{"errorType":"invalid_client"}`.
+Both endpoints therefore still answer, still with a status that reads as "bad credentials",
+and the second half of §1's warning is confirmed one way again. The decided host answers
+`401` with `"reason":"CREDENTIALS_MISSING"` and names
+`google.devicesandservices.health.v4.DataPointsService.ListDataPoints`, which is the
+strongest evidence available without an account that `v4` is live and shaped as §7 assumes.
+This is now also a command rather than a curl loop: `fm api source --verify` runs these
+three requests, prints the same signals, and flags any of them that stops matching the
+row above.
 
 Re-open this ADR when any of these is true - each is a dated, observable event, not a
 mood:

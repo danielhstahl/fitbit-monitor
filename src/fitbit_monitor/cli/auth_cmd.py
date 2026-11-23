@@ -20,6 +20,7 @@ from datetime import timedelta
 from ..api.auth import LoopbackCallback, PkceFlow, exchange_code, fetch_redirect_manually, open_browser
 from ..api.catalog import ALL_SCOPES
 from ..api.errors import CredentialsExpiredError
+from ..api.source import LEGACY_SUNSET, TOKEN_PLANE_SETTINGS, guard as guard_endpoints, state_of
 from ..errors import UsageError
 from ..timeutil import utcnow
 from .common import EXIT_ERROR, EXIT_OK, Session, print_json
@@ -51,6 +52,17 @@ def register(sub: "argparse._SubParsersAction") -> None:
 def cmd_auth_login(args: argparse.Namespace, session: Session) -> int:
     api = require_api_config(session)
     scopes = tuple(api.scopes) or ALL_SCOPES
+    client = session.api_client()
+    # Refuse a retired token endpoint before the browser opens, not after the code comes
+    # back: the consent page still renders, so a user who gets as far as "approve" is
+    # then told their own approval failed. Only the token endpoint is checked here - the
+    # browser dials the consent URL, and the note below says what a retired one means.
+    guard_endpoints(api, live=client.live, settings=TOKEN_PLANE_SETTINGS)
+    # If the consent URL is the retired one, say so before sending the user to approve
+    # there: the page still renders, so the failure would otherwise arrive as their fault.
+    note = _source_note(api, setting="authorize_url")
+    if note:
+        print(note)
     flow = PkceFlow.new()
     url = flow.authorize_url(
         client_id=api.client_id, redirect_uri=api.redirect_uri, scopes=scopes, authorize_url=api.authorize_url
@@ -58,7 +70,6 @@ def cmd_auth_login(args: argparse.Namespace, session: Session) -> int:
     print("1. open this URL in a browser and approve the request:")
     print(f"   {url}")
     code = _collect_code(args, url, api)
-    client = session.api_client()
     try:
         tokens = exchange_code(
             client.transport,
@@ -82,6 +93,27 @@ def cmd_auth_login(args: argparse.Namespace, session: Session) -> int:
     print(f"   access token valid until {tokens.expires_at.isoformat(timespec='seconds')}")
     print("\nnext: fm import --dry-run")
     return EXIT_OK
+
+
+def _source_note(api, *, setting: str | None = None) -> str | None:
+    """A warning line when an ``[api]`` endpoint belongs to the retired source, else nothing.
+
+    Phrased as a note rather than a refusal because the token *machinery* is not broken -
+    PKCE, storage and refresh all work, and work against fixtures or any other host -
+    while the Fitbit endpoints named in the default config issue no tokens at all. Pass
+    ``setting`` to talk about one endpoint specifically (a login command cares about the
+    consent page it is about to show, and nothing else).
+    """
+    state = state_of(api) if setting is None else state_of(api, settings=(setting,))
+    if not state.is_retired:
+        return None
+    names = ", ".join(f"[api] {name}" for name, _url in state.retired)
+    return (
+        f"note: {names} is the retired Fitbit Web API, switched off {LEGACY_SUNSET}: it still "
+        "answers, but it issues no tokens and no data, so nothing started here can finish "
+        "until the port in docs/adr/0002-health-api-source.md section 10 lands. `fm api source "
+        "--verify` shows what does still answer; `fm import --source csv` works today."
+    )
 
 
 def _collect_code(args: argparse.Namespace, url: str, api) -> str:
@@ -109,16 +141,23 @@ def _state_of(url: str) -> str:
 def cmd_auth_status(args: argparse.Namespace, session: Session) -> int:
     store = session.credentials()
     tokens = store.load_or_none()
+    note = _source_note(session.config.api)
     payload: dict[str, object] = {"path": str(store.path), "authenticated": tokens is not None}
     if tokens is None:
         payload["hint"] = "run `fm auth login`"
+        if note:
+            payload["warning"] = note.replace("note: ", "", 1)
         if args.json:
             print_json(payload)
             return EXIT_OK
         print(f"not authenticated: no credentials at {store.path}")
         print("  run `fm auth login` (or `fm config init` first, if you have not registered the app)")
+        if note:
+            print(f"  {note}")
         return EXIT_OK
     payload.update(tokens.public())
+    if note:
+        payload["warning"] = note.replace("note: ", "", 1)
     extra: dict[str, object] = {}
     if args.probe:
         client = session.api_client()
@@ -139,6 +178,8 @@ def cmd_auth_status(args: argparse.Namespace, session: Session) -> int:
     print(f"authenticated as {tokens.user_id} (credentials: {store.path})")
     print(f"  scopes:  {', '.join(tokens.scopes) or '-'}")
     print(f"  expires: {tokens.expires_at.isoformat(timespec='seconds')} ({_human(tokens.seconds_left())} left)")
+    if note:
+        print(f"  {note}")
     if tokens.needs_refresh():
         print("  the access token is expired or nearly so; the next import refreshes it automatically")
     if args.probe and "probe" in payload:

@@ -50,21 +50,26 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .. import __version__
 from ..api.auth import CredentialStore
+from ..api.errors import SourceRetiredError
 from ..api.probe import run_probe
+from ..api.source import DECISION_DOC, LEGACY_SUNSET, state_of
 from ..errors import FmError
 from ..plugins.contract import PLUGIN_API_VERSION
 from ..store import schema
 from .common import EXIT_ERROR, EXIT_OK, EXIT_USAGE, Session, print_json
 
 DESCRIPTION = """\
-Diagnose this install: config, data dir, credentials, store, plugins, clock, last import.
+Diagnose this install: config, data dir, credentials, which API source, store, plugins, clock, last import.
 
 One line per check, with a verdict: ok, warn, fail or skipped. The exit code is nonzero
 only when something FAILED - a fresh install with no token yet is a warning, not a
 failure. --json prints the same report as one JSON object.
 
 The `api` check is the one check that talks to the network, so it is skipped unless
---probe asks for it; `fm api probe` is the same questions with more room to answer.
+--probe asks for it; `fm api probe` is the same questions with more room to answer. The
+`source` check costs nothing: it says whether the host in [api] is still a service at all
+(the Fitbit Web API was switched off on 2026-11-02 and answers 401), which is the
+explanation for an import that has stopped landing anything and never says so.
 """
 
 EPILOG = """\
@@ -404,6 +409,46 @@ def check_store(ctx: Context) -> Check:
         connection.close()
 
 
+def check_source(ctx: Context) -> Check:
+    """Whether the host in ``[api]`` is still a service. Costs no requests.
+
+    The Fitbit Web API was switched off on 2026-11-02 and answers ``401``, so an install
+    pointed at it cannot import over the API whatever its token says. This is a warning
+    and never a failure, on purpose: in this build's default configuration *every* install
+    is in this state, and a check that fails everywhere is a check that gets ignored - the
+    same mistake ``fm doctor`` documents as its own doctrine. The hard signal lives where
+    it is earned: ``fm import``, ``fm api probe`` and ``fm auth login`` refuse with exit 6
+    before they spend a request, and say what to do instead.
+
+    ``tokens=yes`` in the detail is the difference that matters to a reader: that install
+    set up an API import that can no longer run, and the archive source is the way back.
+    """
+    state = state_of(ctx.session.config.api)
+    detail: dict[str, Any] = {
+        "state": state.state,
+        "hosts": list(state.hosts) or ["-"],
+        "retired": [name for name, _url in state.retired],
+        "sunset": LEGACY_SUNSET if state.is_retired else None,
+        "decision": DECISION_DOC,
+    }
+    if not state.is_retired:
+        return Check("source", OK, detail)
+    detail["tokens"] = ctx.session.credentials().exists
+    if not detail["tokens"]:
+        return Check(
+            "source",
+            WARN,
+            detail,
+            hint="the API import path cannot work against this host; `fm import --source csv --path ARCHIVE` needs no API",
+        )
+    return Check(
+        "source",
+        WARN,
+        detail,
+        hint="this install has credentials for a host that issues none: `fm api source`, and `fm import --source csv` in the meantime",
+    )
+
+
 def check_api(ctx: Context) -> Check:
     """What the API would let an import land: grants, datasets, rate limit.
 
@@ -425,6 +470,13 @@ def check_api(ctx: Context) -> Check:
             history=False,
             clock=lambda: ctx.now,
             timezone=ctx.session.config.import_.timezone,
+        )
+    except SourceRetiredError as exc:
+        return Check(
+            "api",
+            WARN,
+            {"probed": False, "requests": 0, "error": _short(exc.message)},
+            hint="nothing was asked: the host is retired (`fm api source`); `fm import --source csv` works",
         )
     except FmError as exc:
         return Check(
@@ -610,6 +662,7 @@ CHECKS: tuple[Callable[[Context], Check], ...] = (
     check_config,
     check_data_dir,
     check_token,
+    check_source,
     check_api,
     check_store,
     check_plugins,
