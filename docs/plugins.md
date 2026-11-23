@@ -508,7 +508,40 @@ re-sign anything.
 
 The plugin that ships with fitbit-monitor, and the one the docs and CI treat as the
 reference for **metrics**: weekly resting heart rate and HRV, with week-over-week and
-4-week deltas, and explicit completeness reporting.
+4-week deltas, and completeness reporting that says what is missing rather than going
+quiet. The file is short enough to read in one sitting
+([`src/fitbit_monitor/plugins/builtin/resting_trend.py`](../src/fitbit_monitor/plugins/builtin/resting_trend.py)),
+and its module docstring is the whole design note, printed here in full - a test fails
+if the two ever disagree:
+
+```text
+``resting_trend`` - the reference METRIC plugin.
+
+Weekly resting heart rate and HRV, the two numbers most people actually track, with
+week-over-week and 4-week deltas and honest completeness reporting. It emits metrics and
+no alerts on purpose: it exists to be the readable example in ``docs/plugins.md``, and
+:mod:`hr_anomaly` beside it is the alerting example.
+
+It also demonstrates the four things every real plugin needs:
+
+* **declared options** with types, defaults and help text (``fm plugins show``),
+* **downsampling** - intraday heart rate is 30k points a week, and this plugin never
+  holds them all,
+* **honesty about what is missing** - a week with two days of data says so, and carries
+  that fraction in ``confidence`` so a chart can show it; a week with no data at all is
+  named in ``resting_trend_data_coverage`` instead of going quietly missing from the
+  output; and the HRV measure reported is whichever of ``rmssd`` / ``sdnn`` the store
+  actually carries, named in every metric that uses it,
+* **a checkpoint** - ``ctx.check_timeout()`` inside the long loops, because the
+  wall-clock budget belongs to the host.
+
+Run it::
+
+    fm plugins run resting_trend --since 8w
+    fm plugins run resting_trend --since 8w --json
+```
+
+Every option it declares, as `fm plugins show` prints it:
 
 ```console
 $ fm plugins show resting_trend
@@ -521,15 +554,88 @@ resting_trend 0.1.0
   options:
     lookback_weeks       int      number of ISO weeks to report [default: 8]
     min_days_per_week    int      weeks with fewer days present than this are reported as incomplete [default: 4]
-    hrv_field            str      which HRV measure to report [default: rmssd]
+    hrv_field            str      which HRV measure to report; auto uses whichever this store actually has, rmssd first [default: auto]
     resting_source       str      where resting HR comes from: a stored daily value, or the quiet overnight window [default: auto]
   config:     every option at its declared default
-
-$ fm plugins run resting_trend --since 5w --json | python -m json.tool | head -30
 ```
 
-It is short enough to read in one sitting:
-[`src/fitbit_monitor/plugins/builtin/resting_trend.py`](../src/fitbit_monitor/plugins/builtin/resting_trend.py).
+Three metrics, and what each one is for:
+
+| metric | what it answers |
+| --- | --- |
+| `resting_hr_weekly` | one ISO week's mean resting HR, `unit=bpm`, `confidence` = days observed / days expected, with `wow_delta` and `delta_4w` in `details` |
+| `hrv_weekly` | the same week's mean HRV, in ms, from the column named by `details.hrv_field` (`rmssd` or `sdnn`), with `hrv_wow_delta` and `hrv_delta_4w` |
+| `resting_trend_data_coverage` | how much of the range you asked for was actually there: `weeks_without_data`, `weeks_incomplete`, and which HRV measure it ended up able to report |
+
+The coverage line comes first in the output on purpose. A store with three weeks of data
+and the default eight-week lookback still gets a line that names the weeks it could not
+fill, instead of quietly returning three rows and no explanation:
+
+```console
+$ fm plugins run resting_trend --since 20d
+ran 1 plugin(s) over 2026-11-03T21:11:16+00:00 .. 2026-11-23T21:11:16+00:00
+  resting_trend: ok (9 metrics)
+      resting_trend_data_coverage = 0.5 fraction of weeks
+      resting_hr_weekly = 57.72 bpm
+      hrv_weekly = 68.52 ms
+      resting_hr_weekly = 57.97 bpm
+      hrv_weekly = 67.47 ms
+      resting_hr_weekly = 57.42 bpm
+      hrv_weekly = 72.02 ms
+      resting_hr_weekly = 54.8 bpm
+      hrv_weekly = 71.7 ms
+summary: 1 ok; exit 0
+```
+
+The text report is the host's generic one (`key = value unit`), which is why every metric
+also carries a `summary` that names its ISO week, and why the detail lives in `--json`:
+
+```console
+$ fm plugins run resting_trend --since 20d --json | python -m json.tool
+...
+      "outcomes": [ {
+          "name": "resting_trend",
+          "status": "ok",
+          "metrics": [
+            {
+              "key": "resting_trend_data_coverage",
+              "value": 0.5,
+              "unit": "fraction of weeks",
+              "summary": "4 of 8 requested weeks had any data; none at all for 2026-W41, 2026-W42, 2026-W43, 2026-W44; below 4 days for 2026-W48; HRV measure reported: RMSSD",
+              "details": {
+                "weeks_requested": 8, "weeks_with_data": 4,
+                "weeks_without_data": ["2026-W41", "2026-W42", "2026-W43", "2026-W44"],
+                "weeks_incomplete": ["2026-W48"], "min_days_per_week": 4,
+                "hrv_field_requested": "auto", "hrv_field_used": "rmssd", "hrv_days_present": 19
+              }
+            },
+            {
+              "key": "resting_hr_weekly",
+              "value": 57.72,
+              "unit": "bpm",
+              "confidence": 0.7142857142857143,
+              "labels": {"iso_week": "2026-W45", "complete": "yes"},
+              "summary": "2026-W45: 57.7 bpm resting over 5/7 days",
+              "details": {"iso_week": "2026-W45", "days_present": 5, "days_expected": 7,
+                          "missing_days": ["2026-11-02", "2026-11-03"], "complete": true,
+                          "wow_delta": null, "delta_4w": null}
+            },
+...
+```
+
+The `hrv_weekly` line for that same week adds `hrv_field` (the measure it actually
+averaged), `hrv_days_present`, and its own `hrv_wow_delta` / `hrv_delta_4w`, and carries
+the same `iso_week` and `complete` labels so a chart can pair the two series.
+
+Two deliberate behaviours worth copying:
+
+* **A week is only owed the days the window covers.** The run window is half-open, so
+  `--until 2026-06-01` does not report 2026-06-01 as a missing day, and a week that has
+  not started inside the window is not reported as empty.
+* **A requested measure the store lacks is said out loud.** `hrv_field = "auto"` picks the
+  column that exists (RMSSD first, because that is what a Fitbit Takeout archive
+  carries) and names it in every metric; asking for one explicitly and getting none is
+  reported in `resting_trend_data_coverage` with the reason, never as silence.
 
 ---
 

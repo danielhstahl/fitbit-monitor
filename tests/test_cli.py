@@ -367,7 +367,12 @@ class RunTest(CliTestCase):
             "--json",
             expect=0,
         )
-        weeks = {m["labels"]["iso_week"] for m in json.loads(text)["outcomes"][0]["metrics"]}
+        weeks = {
+            m["labels"]["iso_week"]
+            for m in json.loads(text)["outcomes"][0]["metrics"]
+            # The run-level coverage line is not a week and has no iso_week label.
+            if m["key"] in ("resting_hr_weekly", "hrv_weekly")
+        }
         self.assertLessEqual(len(weeks), 2)
 
     def test_bad_set_syntax_is_a_usage_error(self) -> None:

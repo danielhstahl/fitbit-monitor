@@ -163,6 +163,54 @@ class WorkedExampleRuns(unittest.TestCase):
         self.assertEqual(outcome.metrics, [], "min_days too high should mean no metric, not a crash")
 
 
+class ReferenceExampleIsQuoted(unittest.TestCase):
+    """The reference metric plugin's docstring *is* the worked example in the docs.
+
+    The ticket asked for "a docstring short enough to serve as the reference example in
+    ``docs/plugins.md``", so the docs print it in full. Two ways that rots: the quote
+    drifts from the code, or the docstring grows into an essay nobody quotes. Both fail
+    here.
+    """
+
+    @staticmethod
+    def _docstring() -> str:
+        from fitbit_monitor.plugins.builtin import resting_trend
+
+        return inspect.cleandoc(resting_trend.__doc__ or "")
+
+    def test_the_docs_quote_the_reference_docstring_verbatim(self) -> None:
+        doc = self._docstring()
+        self.assertTrue(doc, "resting_trend lost the module docstring the docs quote")
+        text = (DOCS / "plugins.md").read_text()
+        self.assertIn(
+            doc,
+            text,
+            "docs/plugins.md no longer quotes resting_trend's module docstring verbatim",
+        )
+
+    def test_the_quoted_docstring_stays_short_enough_to_quote(self) -> None:
+        doc = self._docstring()
+        self.assertLessEqual(
+            len(doc.splitlines()),
+            28,
+            "the reference example has to stay readable in one screen; the hr-anomaly "
+            "docstring is the place for long-form design notes, not this one",
+        )
+        self.assertLessEqual(len(doc), 1_500, "same ratchet, measured in characters")
+
+    def test_the_reference_metric_keys_are_all_documented(self) -> None:
+        """Every metric key the reference plugin emits appears in the docs table."""
+        from fitbit_monitor.plugins.builtin.resting_trend import RestingTrendPlugin
+
+        outcome = run_fixture_plugin(
+            RestingTrendPlugin,
+            store_path=fixture_store(tempfile.mkdtemp(prefix="fm-docs-")),
+        )
+        text = (DOCS / "plugins.md").read_text()
+        for key in sorted({m.key for m in outcome.metrics}):
+            self.assertIn(f"`{key}`", text, f"docs/plugins.md does not document {key}")
+
+
 class DocumentedCommandsParse(unittest.TestCase):
     def test_every_fm_command_in_the_docs_is_a_real_command(self) -> None:
         parser = build_parser()
