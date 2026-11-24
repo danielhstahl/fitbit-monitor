@@ -26,8 +26,8 @@ Nothing you did not choose, and only while an import is running:
 
 | request | sent | why |
 |---|---|---|
-| `fm auth login` / token refresh | your PKCE verifier and authorization code, then the refresh token | to get and renew a token; `accounts.google.com` / `oauth2.googleapis.com` once ADR-0002 §10 lands (today the code still dials the legacy Fitbit endpoints) |
-| `fm import` | `Authorization: Bearer <token>`, the date range you asked for, and an `If-None-Match` ETag when we have one | to fetch the window you named; to `[api] base_url` - the decided value is `https://health.googleapis.com/v4`, the committed default is still `https://api.fitbit.com` until ADR-0002 §10 step 2 lands. Since 2026-11-23 nothing at all is sent to the retired host: `fm import` refuses it with exit 6 before the first request, so "the dead API" is not a destination this program has |
+| `fm auth login` / token refresh | your PKCE verifier and authorization code, then the refresh token | to get and renew a token, at `accounts.google.com` and `oauth2.googleapis.com` - the token plane moved with the data plane, so there is no legacy OAuth endpoint left to dial |
+| `fm import` | `Authorization: Bearer <token>` and the window you asked for - in the query string for a list, in a small JSON body for a rollup - plus an `If-None-Match` ETag when we have one for a `GET` | to fetch the window you named, from `[api] base_url`, which ships as `https://health.googleapis.com/v4`. Since 2026-11-23 nothing at all is sent to the retired Fitbit host: a `[api]` table naming it is refused with exit 6 before the first request, so "the dead API" is not a destination this program has. Rollup `POST`s are never conditional, because an ETag would be claiming a window's contents are immutable |
 
 Plain HTTP is refused for the webhook - `https` or the loopback exception, never a
 plaintext internet hop. The API endpoints default to `https` and only change if you
@@ -37,7 +37,7 @@ reads.
 
 Nothing else in the program opens a socket. Not the store, not the plugin runner,
 not the alert history, not the benchmarks. An import is the only thing that
-initiates contact with Fitbit, and `--fixtures DIR` runs the whole path with no
+initiates contact with the health service, and `--fixtures DIR` runs the whole path with no
 network at all.
 
 ## Out
@@ -71,7 +71,7 @@ no analytics, and no account.
 |---|---|---|
 | `<data-dir>/store.sqlite3` | raw payloads, normalized series, the dataset registry, watermarks, import history, quarantine, alert history | `0600` recommended; the one file that is your data, and the one file `fm store backup` copies |
 | `<data-dir>/backups/*.sqlite3` | snapshots made by `fm store backup` | full copies of the store - protect them exactly as much as the store itself, and delete them when you want the data gone |
-| `<data-dir>/credentials.json` | Fitbit access and refresh tokens | written `0600`; `fm auth logout` deletes it |
+| `<data-dir>/credentials.json` | Google OAuth tokens for the account whose Fitbit data is being imported | written `0600`; `fm auth logout` deletes it |
 | `<data-dir>/imports/*.json` | one report per import run: ranges, counts, watermarks, errors | the last `[import] report_keep` runs; contains dates and counts, not measurements |
 | `<data-dir>/http-etag-cache.json` | ETags and response bodies for conditional GETs | cache only; safe to delete, costs refetches |
 | `<data-dir>/alerts.jsonl` | every delivered alert, append-only | plugin, key, title, message, severity, timestamp, confidence, evidence - a summary of a finding, not a raw series; rotate or delete freely |

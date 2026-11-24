@@ -159,8 +159,11 @@ to read the next version of their data in SQL.
 
 ### 6. Worked example: two overlapping imports of the same intraday day
 
-Import A fetches 1–7 May. Import B, a week later, fetches 5–12 May. For 5 May both send
-the same request, `/1/user/-/heart/date/2026-05-05/1d/1min.json`:
+Import A fetches 1–7 May. Import B, a week later, fetches 5–12 May. For 5 May both ask
+for the same window - under the current source, `POST users/me/dataTypes/heart-rate/dataPoints:rollUp`
+naming `2026-05-05T00:00:00Z .. 2026-05-06T00:00:00Z` at a 60-second window (under the
+retired Fitbit API it was `GET /1/user/-/heart/date/2026-05-05/1d/1min.json`; the example
+works identically either way, which is the point of keying on content):
 
 1. A stores the body (hash `h`) and normalizes 1 440 minute rows.
 2. B's response hashes to `h` again → `INSERT OR IGNORE` stores nothing and counts

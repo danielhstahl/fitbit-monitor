@@ -25,6 +25,7 @@ from fitbit_monitor.api.auth import (
     pkce_challenge,
     refresh,
 )
+from fitbit_monitor.api.catalog import HEALTH_METRICS_SCOPE, PROFILE_SCOPE
 from fitbit_monitor.api.client import FitbitClient, RateLimit
 from fitbit_monitor.api.errors import (
     APIUnavailableError,
@@ -70,7 +71,7 @@ def tokens(**overrides) -> TokenSet:
         access_token="access-1",
         refresh_token="refresh-1",
         expires_at=datetime.now(UTC) + timedelta(hours=6),
-        scopes=("profile", "heartbeat"),
+        scopes=(HEALTH_METRICS_SCOPE, PROFILE_SCOPE),
         user_id="42",
     )
     base.update(overrides)
@@ -103,21 +104,34 @@ class FixtureFormatTest(unittest.TestCase):
     def test_recorded_fixtures_load_and_replay(self) -> None:
         transport = ReplayTransport(FIXTURES)
         self.assertGreater(len(transport), 60)
-        response = transport.request("GET", "https://api.fitbit.com/1/user/-/profile.json")
+        response = transport.request("GET", "https://health.googleapis.com/v4/users/me/profile")
         self.assertEqual(response.status, 200)
-        self.assertIn("user", response.json())
+        self.assertIn("membershipStartDate", response.json())
         self.assertEqual(transport.misses, 0)
 
-    def test_the_authenticated_user_id_is_normalised(self) -> None:
+    def test_the_health_user_id_is_normalised(self) -> None:
+        """A fixture set is portable between accounts, so the user id is not part of a key.
+
+        ``users/me`` is what the catalog asks for and what the corpus records, but
+        ``[api] user_id`` may name the numeric ``healthUserId`` instead - and a corpus
+        recorded on one account has to replay on the other.
+        """
+        recorded = json.loads(sorted(FIXTURES.glob("*.json"))[0].read_text())
+        request = recorded["request"]
+        path = request["path"]
+        self.assertIn("/users/me/", path)
+        query = "&".join(f"{k}={v}" for k, v in sorted(request["query"].items()))
         transport = ReplayTransport(FIXTURES)
-        response = transport.request("GET", "https://api.fitbit.com/1/user/123456/sleep/date/2026-05-01.json")
-        self.assertEqual(response.status, 200)
+        asked = path.replace("/users/me/", "/users/9876543/") + (f"?{query}" if query else "")
+        response = transport.request(request["method"], f"https://health.googleapis.com/v4{asked}")
+        self.assertEqual(response.status, 200, asked)
+        self.assertEqual(transport.misses, 0)
 
     def test_unrecorded_request_is_a_named_miss(self) -> None:
         transport = ReplayTransport(FIXTURES)
         with self.assertRaises(ReplayMissError) as caught:
-            transport.request("GET", "https://api.fitbit.com/1/user/-/nope/nothere.json")
-        self.assertIn("/1/user/-/nope/nothere.json", str(caught.exception))
+            transport.request("GET", "https://health.googleapis.com/v4/users/me/nope/nothere")
+        self.assertIn("/users/me/nope/nothere", str(caught.exception))
         self.assertEqual(transport.misses, 1)
 
     def test_hand_written_fixture_can_name_its_key(self) -> None:
@@ -138,17 +152,17 @@ class FixtureFormatTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             recorder = RecordingTransport(inner, Path(tmp))
-            recorder.request("GET", "https://api.fitbit.com/1/user/-/heart/date/2026-05-01/1d/1min.json")
-            recorder.request("GET", "https://api.fitbit.com/1/user/-/sleep/date/2026-05-02.json")
+            recorder.request("GET", "https://health.googleapis.com/v4/users/me/dataTypes/heart-rate/dataPoints")
+            recorder.request("GET", "https://health.googleapis.com/v4/users/me/dataTypes/sleep/dataPoints")
             replay = ReplayTransport(Path(tmp))
             self.assertEqual(len(replay), 2)
-            self.assertEqual(replay.request("GET", "https://api.fitbit.com/1/user/-/heart/date/2026-05-01/1d/1min.json").json(), {"heart": []})
-            self.assertEqual(replay.request("GET", "https://api.fitbit.com/1/user/-/sleep/date/2026-05-02.json").status, 404)
+            self.assertEqual(replay.request("GET", "https://health.googleapis.com/v4/users/me/dataTypes/heart-rate/dataPoints").json(), {"heart": []})
+            self.assertEqual(replay.request("GET", "https://health.googleapis.com/v4/users/me/dataTypes/sleep/dataPoints").status, 404)
             self.assertEqual(replay.misses, 0)
 
 
 class _LocalAPI(BaseHTTPRequestHandler):
-    """A loopback stand-in for api.fitbit.com, so the urllib path is really exercised."""
+    """A loopback stand-in for the v4 endpoint, so the urllib path is really exercised."""
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path.startswith("/gone"):
@@ -209,9 +223,9 @@ class ClientBehaviourTest(unittest.TestCase):
 
     def test_bearer_token_and_headers_are_sent(self) -> None:
         client, transport = self.client([Response(200, b'{"ok": true}', {"X-RateLimit-Remaining": "140"})])
-        self.assertEqual(client.get_json("/1/user/-/profile.json"), {"ok": True})
+        self.assertEqual(client.get_json("/users/me/profile"), {"ok": True})
         first = transport.requests[0]
-        self.assertEqual((first["method"], first["url"]), ("GET", "https://api.fitbit.com/1/user/-/profile.json"))
+        self.assertEqual((first["method"], first["url"]), ("GET", "https://health.googleapis.com/v4/users/me/profile"))
         self.assertEqual(first["headers"]["Authorization"], "Bearer access-1")
         self.assertEqual(first["headers"]["Accept"], "application/json")
         self.assertEqual(client.rate_limit.remaining, 140)
@@ -222,33 +236,51 @@ class ClientBehaviourTest(unittest.TestCase):
         client._tokens = None
         client.credentials.delete()
         with self.assertRaises(NotAuthenticatedError):
-            client.get("/1/user/-/profile.json")
+            client.get("/users/me/profile")
 
-    def test_a_configured_user_id_replaces_the_dash(self) -> None:
+    def test_a_configured_health_user_id_replaces_me(self) -> None:
         client, transport = self.client([Response(200, b"{}")], api=ApiSettings(user_id="9999"))
-        client.get("/1/user/-/sleep/date/2026-05-01.json")
-        self.assertIn("/user/9999/sleep/", transport.requests[0]["url"])
+        client.get("/users/me/dataTypes/sleep/dataPoints")
+        self.assertIn("/users/9999/dataTypes/sleep/", transport.requests[0]["url"])
 
-    def test_5xx_is_retried_with_backoff_then_raises(self) -> None:
+    def test_a_transient_status_is_retried_with_backoff(self) -> None:
+        """503 then 504 then data: the documented trio, retried with jittered backoff."""
         sleeps: list[float] = []
         client, transport = self.client(
-            [Response(500, b"boom"), Response(502, b"boom"), Response(200, b'{"ok":1}')], sleeps=sleeps
+            [Response(503, b"boom"), Response(504, b"boom"), Response(200, b'{"ok":1}')], sleeps=sleeps
         )
-        self.assertEqual(client.get_json("/1/user/-/x.json"), {"ok": 1})
+        self.assertEqual(client.get_json("/users/me/dataTypes/steps/dataPoints"), {"ok": 1})
         self.assertEqual(len(transport.requests), 3)
         self.assertEqual(len(sleeps), 2, "exponential backoff between attempts")
+        self.assertTrue(all(seconds > 0 for seconds in sleeps), "the backoff actually waits")
+
+    def test_an_internal_error_is_not_retried(self) -> None:
+        """500 INTERNAL is not in the trio the API documents for retry.
+
+        AIP reserves it for "the service was unable to return something it has for this
+        request", which in practice means the query itself - a rollup window the analyzer
+        cannot answer, most often. Repeating it four times costs the same quota and gets
+        the same answer, so it is reported as the refusal it is.
+        """
+        client, transport = self.client([Response(500, b'{"error":{"code":500,"status":"INTERNAL","message":"bad"}}')])
+        with self.assertRaises(HTTPError) as caught:
+            client.get("/users/me/dataTypes/steps/dataPoints")
+        self.assertEqual(caught.exception.status, 500)
+        self.assertEqual(len(transport.requests), 1)
 
     def test_giving_up_after_the_retry_budget(self) -> None:
-        client, transport = self.client([Response(500, b"a"), Response(500, b"b"), Response(500, b"c"), Response(500, b"d")])
+        client, transport = self.client(
+            [Response(503, b"a"), Response(503, b"b"), Response(503, b"c"), Response(503, b"d")]
+        )
         with self.assertRaises(HTTPError) as caught:
-            client.get("/1/user/-/x.json")
-        self.assertEqual(caught.exception.status, 500)
-        self.assertEqual(len(transport.requests), 4)
+            client.get("/users/me/dataTypes/steps/dataPoints")
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(len(transport.requests), 4, "retries plus the first attempt")
 
     def test_4xx_other_than_auth_is_not_retried(self) -> None:
         client, transport = self.client([Response(400, b'{"errors":[{"message":"bad date","location":"date"}]}')])
         with self.assertRaises(HTTPError) as caught:
-            client.get("/1/user/-/bad.json")
+            client.get("/users/me/dataTypes/steps/dataPoints")
         self.assertEqual(caught.exception.status, 400)
         self.assertIn("bad date", str(caught.exception))
         self.assertEqual(len(transport.requests), 1)
@@ -258,13 +290,13 @@ class ClientBehaviourTest(unittest.TestCase):
         client, transport = self.client(
             [Response(429, b"", {"Retry-After": "3"}), Response(200, b'{"ok":1}')], sleeps=sleeps
         )
-        self.assertEqual(client.get_json("/1/user/-/x.json"), {"ok": 1})
+        self.assertEqual(client.get_json("/users/me/dataTypes/steps/dataPoints"), {"ok": 1})
         self.assertEqual(sleeps[0], 3.0)
 
     def test_429_past_the_patience_limit_raises_rate_limit(self) -> None:
         client, transport = self.client([Response(429, b"", {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "900"})])
         with self.assertRaises(RateLimitError):
-            client.get("/1/user/-/x.json")
+            client.get("/users/me/dataTypes/steps/dataPoints")
 
     def test_the_budget_is_respected_before_the_ceiling(self) -> None:
         sleeps: list[float] = []
@@ -272,15 +304,15 @@ class ClientBehaviourTest(unittest.TestCase):
             [Response(200, b'{"ok":1}', {"X-RateLimit-Remaining": "2", "X-RateLimit-Reset": "12"}), Response(200, b'{"ok":2}')],
             sleeps=sleeps,
         )
-        client.get_json("/1/user/-/a.json")
-        client.get_json("/1/user/-/b.json")
+        client.get_json("/users/me/dataTypes/steps/dataPoints")
+        client.get_json("/users/me/dataTypes/distance/dataPoints")
         self.assertEqual(sleeps, [12.0], "stop before the ceiling, wait for the reset")
 
     def test_rate_limit_too_far_away_stops_the_run(self) -> None:
         client, _ = self.client([Response(200, b"{}", {"X-RateLimit-Remaining": "1", "X-RateLimit-Reset": "5000"})])
-        client.get("/1/user/-/a.json")
+        client.get("/users/me/dataTypes/steps/dataPoints")
         with self.assertRaises(RateLimitError):
-            client.get("/1/user/-/b.json")
+            client.get("/users/me/dataTypes/distance/dataPoints")
 
     def test_an_expired_token_is_refreshed_before_the_request(self) -> None:
         sleeps: list[float] = []
@@ -300,7 +332,7 @@ class ClientBehaviourTest(unittest.TestCase):
             sleep=lambda _s: None,
             import_settings=ImportSettings(),
         )
-        self.assertEqual(client.get_json("/1/user/-/profile.json"), {"ok": True})
+        self.assertEqual(client.get_json("/users/me/profile"), {"ok": True})
         self.assertEqual(credentials.load().access_token, "access-2", "the refreshed token is persisted")
         self.assertEqual(transport.requests[1]["headers"]["Authorization"], "Bearer access-2")
         self.assertTrue((tmp / "credentials.json").exists())
@@ -320,7 +352,7 @@ class ClientBehaviourTest(unittest.TestCase):
             ApiSettings(client_id="cid", client_secret="c"), credentials, transport=transport, import_settings=ImportSettings()
         )
         with self.assertRaises(HTTPError):
-            client.get("/1/user/-/profile.json")
+            client.get("/users/me/profile")
         self.assertEqual(len(transport.requests), 3)
 
     def test_a_refused_refresh_names_the_fix(self) -> None:
@@ -345,8 +377,8 @@ class ClientBehaviourTest(unittest.TestCase):
             client = FitbitClient(
                 ApiSettings(), credentials, transport=transport, import_settings=ImportSettings(), etag_cache_path=cache_path
             )
-            self.assertEqual(client.get_json("/1/user/-/heart/date/2026-05-01/1d/1min.json"), {"heart": [1]})
-            self.assertEqual(client.get_json("/1/user/-/heart/date/2026-05-01/1d/1min.json"), {"heart": [1]})
+            self.assertEqual(client.get_json("/users/me/dataTypes/heart-rate/dataPoints"), {"heart": [1]})
+            self.assertEqual(client.get_json("/users/me/dataTypes/heart-rate/dataPoints"), {"heart": [1]})
             self.assertEqual(transport.requests[1]["headers"]["If-None-Match"], '"abc"')
             self.assertEqual(client.not_modified, 1)
             client.flush()
@@ -356,7 +388,7 @@ class ClientBehaviourTest(unittest.TestCase):
             client2 = FitbitClient(
                 ApiSettings(), credentials, transport=transport2, import_settings=ImportSettings(), etag_cache_path=cache_path
             )
-            self.assertEqual(client2.get_json("/1/user/-/heart/date/2026-05-01/1d/1min.json"), {"heart": [1]})
+            self.assertEqual(client2.get_json("/users/me/dataTypes/heart-rate/dataPoints"), {"heart": [1]})
 
     def test_a_lost_etag_body_falls_back_to_404_handling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -370,14 +402,14 @@ class ClientBehaviourTest(unittest.TestCase):
                 ),
                 import_settings=ImportSettings(),
             )
-            client.get("/1/user/-/x.json")
+            client.get("/users/me/dataTypes/steps/dataPoints")
             client.etags._entries.clear()
             with self.assertRaises(HTTPError):
-                client.get("/1/user/-/x.json")
+                client.get("/users/me/dataTypes/steps/dataPoints")
 
     def test_post_form_is_used_for_the_token_endpoints(self) -> None:
         client, transport = self.client([Response(200, b'{"access_token":"x"}')])
-        response = client.post_form("https://api.fitbit.com/oauth2/token", {"grant_type": "refresh_token"})
+        response = client.post_form("https://oauth2.googleapis.com/token", {"grant_type": "refresh_token"})
         self.assertTrue(response.ok)
         self.assertEqual(transport.requests[-1]["method"], "POST")
 
@@ -385,7 +417,7 @@ class ClientBehaviourTest(unittest.TestCase):
         client, _ = self.client(
             [Response(200, b"{}", {"X-RateLimit-Limit": "150", "X-RateLimit-Remaining": "3", "X-RateLimit-Reset": "60", "X-RateLimit-Limit-Interval": "15m"})]
         )
-        client.get("/1/user/-/x.json")
+        client.get("/users/me/dataTypes/steps/dataPoints")
         self.assertEqual(
             client.rate_limit.as_dict(),
             {"limit": 150, "remaining": 3, "reset_in": 60.0, "scope": "15m"},
@@ -406,7 +438,7 @@ class AuthFlowTest(unittest.TestCase):
         )
         result = exchange_code(
             transport,
-            token_url="https://api.fitbit.com/oauth2/token",
+            token_url="https://oauth2.googleapis.com/token",
             client_id="cid",
             client_secret="secret",
             code="the-code",
@@ -414,7 +446,7 @@ class AuthFlowTest(unittest.TestCase):
             code_verifier="verifier",
         )
         first = transport.requests[0]
-        self.assertEqual((first["method"], first["url"]), ("POST", "https://api.fitbit.com/oauth2/token"))
+        self.assertEqual((first["method"], first["url"]), ("POST", "https://oauth2.googleapis.com/token"))
         self.assertEqual(first["headers"]["Authorization"][:6], "Basic ")
         self.assertIn(b"grant_type=authorization_code", _body(transport))
         self.assertIn(b"code_verifier=verifier", _body(transport))
@@ -424,7 +456,7 @@ class AuthFlowTest(unittest.TestCase):
         transport = ScriptedTransport([Response(200, b'{"access_token":"a2","refresh_token":"r2","expires_in":100}')])
         result = refresh(
             transport,
-            token_url="https://api.fitbit.com/oauth2/token",
+            token_url="https://oauth2.googleapis.com/token",
             client_id="cid",
             client_secret="s",
             refresh_token="r1",
@@ -437,7 +469,7 @@ class AuthFlowTest(unittest.TestCase):
         with self.assertRaises(CredentialsExpiredError) as caught:
             refresh(
                 transport,
-                token_url="https://api.fitbit.com/oauth2/token",
+                token_url="https://oauth2.googleapis.com/token",
                 client_id="c",
                 client_secret="s",
                 refresh_token="r",

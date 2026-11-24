@@ -18,6 +18,7 @@ from pathlib import Path
 from test_cli import CliTestCase
 
 from import_support import EXPECTED_ROWS, FIXTURES, write_credentials
+from fitbit_monitor.api.catalog import HEALTH_METRICS_SCOPE, SLEEP_SCOPE
 from fitbit_monitor.cli.common import EXIT_USAGE
 from fitbit_monitor.ingest.report import (
     EXIT_INTERRUPTED,
@@ -45,17 +46,33 @@ class ImportCliTest(CliTestCase):
         )
 
     # --- planning -----------------------------------------------------------
+    def test_health_and_archive_are_the_two_sources_under_other_names(self) -> None:
+        """ADR-0002 §9 renamed the sources; the flag accepts both spellings.
+
+        What a script must be able to rely on is that the *answer* is the same object,
+        and that the store still says "api" - watermarks are keyed by the stored name.
+        """
+        plain, text = self.import_window("--dry-run", "--source", "health", expect=EXIT_OK)
+        named, api_text = self.import_window("--dry-run", expect=EXIT_OK)
+        self.assertEqual(text, api_text)
+        self.assertEqual(plain, named)
+        export = self.home / "export"
+        export.mkdir()
+        (export / "hrv.csv").write_text("date,hrvValue,sdnn\n2026-05-01,44.0,30\n")
+        _code, text = self.fm("import", "--source", "archive", "--path", str(export), "--json", expect=EXIT_OK)
+        self.assertEqual(json.loads(text)["source"], "csv", "the answer names the source it ran, canonically")
+
     def test_dry_run_costs_nothing(self) -> None:
         code, text = self.import_window("--dry-run", expect=EXIT_OK)
         self.assertIn("heart_rate", text)
-        self.assertIn("73", text, "the plan states its request cost")
+        self.assertIn("13", text, "the plan states its request cost")
         self.assertFalse(self.store_path.exists(), "--dry-run must not create or touch the store")
 
     def test_dry_run_json_is_the_plan(self) -> None:
         _, text = self.import_window("--dry-run", "--json", expect=EXIT_OK)
         plan = json.loads(text)
         self.assertEqual([d["dataset"] for d in plan["datasets"]], sorted(EXPECTED_ROWS))
-        self.assertEqual(plan["requests_estimate"], 73)
+        self.assertEqual(plan["requests_estimate"], 13)
 
     def test_unknown_dataset_is_a_usage_error(self) -> None:
         code, text = self.import_window("--dataset", "glucose")
@@ -128,11 +145,17 @@ class ImportCliTest(CliTestCase):
         forbidden.mkdir()
         for path in sorted(FIXTURES.glob("*.json")):
             payload = json.loads(path.read_text())
-            if "/hrv/" in str(payload.get("request", {}).get("path", "")):
+            if "daily-heart-rate-variability" in str(payload.get("request", {}).get("path", "")):
                 payload["response"] = {
                     "status": 403,
-                    "body": {"errors": [{"errorType": "insufficient_client_scope", "message": "no permission for hrv"}]},
-                    "headers": {"X-RateLimit-Remaining": "120", "X-RateLimit-Reset": "60"},
+                    "body": {
+                        "error": {
+                            "code": 403,
+                            "status": "PERMISSION_DENIED",
+                            "message": "no permission for hrv",
+                        }
+                    },
+                    "headers": {},
                 }
             (forbidden / path.name).write_text(json.dumps(payload))
         self.fm("import", "--fixtures", str(forbidden), "--since", SINCE, "--until", UNTIL, expect=EXIT_PARTIAL_FAILURE)
@@ -148,7 +171,7 @@ class ImportCliTest(CliTestCase):
     def test_a_big_pull_is_confirmed_or_said_to_be_unattended(self) -> None:
         config = self.home / "config" / "fitbit-monitor" / "config.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text("[import]\nconfirm_above_requests = 40\n")
+        config.write_text("[import]\nconfirm_above_requests = 8\n")
         # No TTY under the test runner: the run proceeds and says it is unattended.
         _code, text = self.import_window()
         self.assertIn("running unattended", text)
@@ -180,11 +203,18 @@ class ImportCliTest(CliTestCase):
 
     # --- permissions and sources -------------------------------------------
     def test_a_scope_the_token_lacks_is_a_skip_with_a_reason(self) -> None:
-        write_credentials(self.credentials_path, scopes=("profile", "activity", "sleep"))
+        write_credentials(self.credentials_path, scopes=(HEALTH_METRICS_SCOPE, SLEEP_SCOPE))
         _, text = self.import_window("--json", expect=EXIT_OK)
         report = json.loads(text)
-        self.assertEqual({d["dataset"] for d in report["datasets"]}, {"daily_summary", "sleep"})
-        self.assertTrue(any("spo2" in note for note in report["notes"]), "the reason is printed, not swallowed")
+        self.assertEqual(
+            {d["dataset"] for d in report["datasets"]},
+            {"heart_rate", "hrv", "sleep", "spo2"},
+            "everything the two granted scopes covers, and nothing that needs activity_and_fitness",
+        )
+        self.assertTrue(
+            any("daily_summary" in note and "activity_and_fitness" in note for note in report["notes"]),
+            "the reason is printed, not swallowed",
+        )
 
     def test_csv_source_from_a_directory(self) -> None:
         export = self.home / "export"

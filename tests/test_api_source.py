@@ -50,7 +50,7 @@ class FakeTransport:
         for needle, response in self.responses.items():
             if needle in url:
                 return response
-        return Response(404, b'{"errors":[{"errorType":"not_found"}]}')
+        return Response(404, b'{"error":{"code":404,"status":"NOT_FOUND","message":"no"}}')
 
 
 class LegacySettings:
@@ -102,8 +102,22 @@ class HostClassificationTest(unittest.TestCase):
 
 
 class StateTest(unittest.TestCase):
-    def test_default_settings_are_retired_in_all_three_endpoints(self) -> None:
+    def test_the_shipped_defaults_are_the_decided_source(self) -> None:
+        """The defaults are the ADR's answer, not the retired host.
+
+        This is the assertion that keeps the port from quietly regressing: if a default
+        `ApiSettings` ever classifies as retired, every command refuses to dial anything.
+        """
         state = source.state_of(ApiSettings())
+        self.assertEqual(state.state, source.STATE_DECIDED)
+        self.assertFalse(state.is_retired)
+        self.assertEqual(state.retired, ())
+        self.assertEqual(state.as_dict()["endpoints"]["base_url"], source.DECIDED_BASE_URL)
+        self.assertIn("Google Health API", state.short())
+
+    def test_a_config_left_on_the_retired_host_names_all_three_endpoints(self) -> None:
+        """Someone who pinned [api] back at api.fitbit.com is refused, with the reasons."""
+        state = source.state_of(ApiSettings(base_url="https://api.fitbit.com", authorize_url="https://www.fitbit.com/oauth2/authorize", token_url="https://api.fitbit.com/oauth2/token"))
         self.assertEqual(state.state, source.STATE_RETIRED)
         self.assertTrue(state.is_retired)
         self.assertEqual(
@@ -209,14 +223,17 @@ class ClientGuardTest(unittest.TestCase):
 
     def test_get_refuses_a_retired_base_url_without_dialling_it(self) -> None:
         transport = FakeTransport(live=True)
-        client = self.client(transport)
+        client = self.client(transport, settings=ApiSettings(base_url="https://api.fitbit.com"))
         self.assertTrue(client.live)
         with self.assertRaises(SourceRetiredError):
-            client.get("/1/user/-/profile.json")
+            client.get("/users/me/profile")
         self.assertEqual(transport.requests, [], "the request was never spent")
 
     def test_a_retired_token_url_refuses_post_form_and_refresh(self) -> None:
-        api = ApiSettings(base_url="http://127.0.0.1:8000/v4")  # live API, retired token
+        api = ApiSettings(
+            base_url="http://127.0.0.1:8000/v4",  # a live API...
+            token_url="https://api.fitbit.com/oauth2/token",  # ...with a retired login
+        )
         transport = FakeTransport(live=True)
         client = self.client(transport, settings=api)
         with self.assertRaises(SourceRetiredError):
@@ -226,11 +243,16 @@ class ClientGuardTest(unittest.TestCase):
         self.assertEqual(transport.requests, [])
 
     def test_replay_transport_is_free_to_use_the_retired_urls(self) -> None:
-        """The whole fixture suite depends on this."""
+        """The whole fixture suite depends on this.
+
+        Even with a config that names the dead host: the guard binds transports that can
+        reach the internet, because ADR-0002 §8 makes the replay corpus the dev and CI
+        source and a fixture is not a dial.
+        """
         replay = ReplayTransport(FIXTURES)
-        client = self.client(replay)
+        client = self.client(replay, settings=ApiSettings(base_url="https://api.fitbit.com"))
         self.assertFalse(client.live)
-        response = client.get("/1/user/-/profile.json")
+        response = client.get("/users/me/profile")
         self.assertTrue(response.ok)
 
     def test_a_live_decided_client_is_not_refused(self) -> None:
@@ -241,7 +263,9 @@ class ClientGuardTest(unittest.TestCase):
         self.assertEqual(len(transport.requests), 1)
 
     def test_source_state_does_not_raise_and_reports_the_config(self) -> None:
-        self.assertEqual(self.client(FakeTransport()).source_state().state, source.STATE_RETIRED)
+        self.assertEqual(self.client(FakeTransport()).source_state().state, source.STATE_DECIDED)
+        retired = self.client(FakeTransport(), settings=ApiSettings(base_url="https://api.fitbit.com"))
+        self.assertEqual(retired.source_state().state, source.STATE_RETIRED)
 
 
 class LiveCheckTest(unittest.TestCase):
@@ -334,8 +358,28 @@ class _NullCredentials:
         raise AssertionError("nothing should be saved")
 
 
+#: An ``[api]`` table left pointing at the retired source: what a config written before
+#: the port looks like, and the only way a current build gets into this state.
+RETIRED_API = (
+    "[api]\n"
+    'base_url = "https://api.fitbit.com"\n'
+    'authorize_url = "https://www.fitbit.com/oauth2/authorize"\n'
+    'token_url = "https://api.fitbit.com/oauth2/token"\n'
+)
+
+
 class RetiredSourceCliTest(CliTestCase):
-    """The commands a user reaches when an import lands nothing."""
+    """The commands a user reaches when an import lands nothing.
+
+    Every test here starts from a config pinned at the retired host, because that - not
+    the shipped default - is what produces the refusal. The guard exists for the config
+    that outlived the service, and for the person who copy-pasted the old host back in
+    when their token stopped working.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_config(RETIRED_API)
 
     def config_path(self) -> Path:
         path = self.home / "config" / "fitbit-monitor" / "config.toml"
@@ -375,7 +419,7 @@ class RetiredSourceCliTest(CliTestCase):
         self.assertIn("source csv", payload["hint"])
 
     def test_login_refuses_before_the_browser_opens(self) -> None:
-        self.write_config('[api]\nclient_id = "test-client"\nclient_secret = "test-secret"\n')
+        self.config_path().write_text(RETIRED_API + 'client_id = "test-client"\nclient_secret = "test-secret"\n')
         write_credentials(self.credentials_path)
         code, text = self.fm("auth", "login", "--manual", "the-code", expect=EXIT_SOURCE)
         self.assertNotIn("open this URL", text, "the user is not sent to consent against a dead endpoint")
@@ -427,8 +471,8 @@ class RetiredSourceCliTest(CliTestCase):
         self.assertNotIn("dev.fitbit.com/apps", text, "the sunset registration page is not an instruction")
 
     def test_doctor_reports_the_source_without_failing_the_run(self) -> None:
-        """A warning: every default install is in this state, and a check that always fails
-        is a check that gets ignored when something is genuinely wrong."""
+        """A warning, not a failure: a check that shouts at a config mistake the tool can
+        still work around is a check that gets ignored when something is genuinely wrong."""
         write_credentials(self.credentials_path)
         _code, text = self.fm("doctor", "--json", expect=EXIT_OK)
         checks = {check["check"]: check for check in json.loads(text)["checks"]}
@@ -466,8 +510,14 @@ class RetiredSourceCliTest(CliTestCase):
         transport = FakeTransport(live=True, responses=LiveCheckTest.RESPONSES)
         from fitbit_monitor.cli import api_cmd
 
+        retired = ApiSettings(
+            base_url="https://api.fitbit.com",
+            authorize_url="https://www.fitbit.com/oauth2/authorize",
+            token_url="https://api.fitbit.com/oauth2/token",
+        )
+
         def fake_api_client(self, *args, **kwargs):  # noqa: ANN001 - patching a method
-            return FitbitClient(ApiSettings(), credentials=_NullCredentials(), transport=transport)
+            return FitbitClient(retired, credentials=_NullCredentials(), transport=transport)
 
         with mock.patch.object(api_cmd.Session, "api_client", fake_api_client):
             code, text = self.fm("api", "source", "--verify", expect=EXIT_SOURCE)

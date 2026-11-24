@@ -24,18 +24,16 @@ anywhere except the alert webhook you configure - see
 >
 > Data source: the **Google Health API** (`https://health.googleapis.com/v4`), decided
 > and dated in [ADR-0002](docs/adr/0002-health-api-source.md), with a Google Takeout
-> archive as an equal first-class source (`fm import --source csv`). The legacy Fitbit
-> Web API that the client code still targets was turned off on 2026-11-02 and returns no
-> data; that ADR's section 10 is the port.
+> archive as an equal first-class source (`fm import --source csv --path ARCHIVE`). The
+> four `googlehealth.*` readonly scopes, `users/me/...` paths and the rollup verbs are
+> what `fm` speaks today; the legacy Fitbit Web API it used to speak was turned off on
+> 2026-11-02 and is refused rather than dialled.
 >
-> **Until that port lands, `fm` refuses to dial the retired host.** It answers `401`, which
-> is the one failure an import tool must not report as "log in again" - there is no login
-> that fixes a service that issues no tokens. So `fm import`, `fm api probe` and
-> `fm auth login` stop you beforehand with exit **6**, the date, and what to do instead.
-> `fm api source` is the one command that answers "which API is this, and is it still
-> there?" - with `--verify` it asks each host live, needing no token and no client id.
-> Everything else keeps working: `fm import --source csv`, `fm dev seed`, the store, the
-> plugins.
+> A `[api]` table still pointing at `api.fitbit.com` is refused with exit **6** before
+> anything is asked, because that host answers `401` forever - the one failure an import
+> tool must not report as "log in again", since no login fixes a service that issues no
+> tokens. `fm api source` answers "which API is this, and is it still there?", and with
+> `--verify` it asks each host live, needing no token and no client id.
 
 ## Quickstart
 
@@ -233,9 +231,9 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
   tools, and why the CLI is argparse.
 * [docs/adr/0002-health-api-source.md](docs/adr/0002-health-api-source.md) - where the
   data comes from: the **Google Health API** (`health.googleapis.com/v4`) and a Takeout
-  archive as two first-class sources - and the record that the legacy Fitbit Web API the
-  client still calls was turned off on 2026-11-02, so `fm auth login` / `fm import`
-  against `api.fitbit.com` cannot work until the port in that ADR's section 10 lands.
+  archive as two first-class sources, the four readonly scopes that cover them, and the
+  record that the legacy Fitbit Web API this client used to speak was turned off on
+  2026-11-02 (the port is section 10 of that ADR, and it has landed).
 * [docs/adr/0003-storage-model.md](docs/adr/0003-storage-model.md) - why raw payloads
   are the record, one `series` table plus typed views, and what makes an overlapping
   import idempotent.

@@ -1,21 +1,23 @@
-"""The polite Fitbit API client: auth, retries, rate-limit budget, ETags.
+"""The polite Google Health API client: auth, retries, a local rate ceiling, ETags.
 
-One class, one public verb (:meth:`FitbitClient.get`), and a hard rule that nothing
-here is a surprise to the caller:
+One class, two verbs (:meth:`HealthClient.get` for a ``list``, :meth:`HealthClient.post`
+for a ``rollUp``), and a hard rule that nothing here is a surprise to the caller:
 
-* **Rate limit first.** Every response carries ``X-RateLimit-Remaining`` and
-  ``-Reset``; the client keeps the last reading, stops *before* the ceiling
-  (``[import] rate_limit_reserve``) and waits for the reset rather than collecting
-  429s. ``[import] max_wait_seconds`` bounds how long one run will sit still - past
-  that it raises :class:`~fitbit_monitor.api.errors.RateLimitError` and the caller
-  re-runs later, because watermarks make re-running cheap.
-* **Retries with backoff** on 429 and 5xx, honouring ``Retry-After``. 4xx that is
-  not 401/429 is a real answer (no data for that day) and is raised, not retried.
-* **Tokens are refreshed before they expire**, never after a request fails with 401
-  if it can be helped - and if the refresh itself is refused, the message says
+* **Pace yourself, because the API will not tell you to.** The Google Health API allows
+  300 requests/minute/user and publishes **no** ``X-RateLimit-*`` headers to pace
+  against, so the legacy client's "read the ceiling off the response and stop before
+  it" scheme has nothing to read. :class:`TokenBucket` is the replacement: a local
+  ceiling (``[api] requests_per_second``, 5/s by default) that spends a request
+  *before* it is made instead of discovering afterwards that it was one too many.
+* **Retries with jittered backoff** on ``429 RESOURCE_EXHAUSTED``, ``503 UNAVAILABLE``
+  and ``504 DEADLINE_EXCEEDED`` - the trio Google's own rate-limits page names -
+  honouring ``Retry-After`` when there is one. Any other 4xx is a real answer and is
+  raised, not retried.
+* **Tokens are refreshed before they expire**, never after a request fails with 401 if
+  it can be helped - and if the refresh itself is refused, the message says
   ``fm auth login``.
 * **ETags** are cached on disk, so re-importing an overlapping window costs 304s
-  instead of full payloads.
+  instead of full payloads. Only GETs: a ``rollUp`` POST is not conditional.
 * **A retired host is refused, not dialled.** ``[api] base_url`` pointing at the Fitbit
   Web API - switched off on 2026-11-02, still answering ``401`` - raises
   :class:`~fitbit_monitor.api.errors.SourceRetiredError` before the request rather than
@@ -26,9 +28,11 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 import urllib.parse
 from dataclasses import dataclass
+from hashlib import sha1
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -36,7 +40,9 @@ from ..config import ApiSettings, ImportSettings
 from ..timeutil import utcnow
 from . import source as source_state
 from .auth import CredentialStore, TokenSet, refresh
+from .catalog import short_scope
 from .errors import (
+    MISSING_SCOPE_REASONS,
     CredentialsExpiredError,
     HTTPError,
     NotAuthenticatedError,
@@ -48,11 +54,25 @@ from .http import Response, UrllibTransport
 log = logging.getLogger(__name__)
 
 BACKOFF_BASE_SECONDS = 0.5
+#: The statuses the API's own documentation says to retry, with exponential backoff and
+#: random jitter: rate limited, and the two transient unavailability codes.
+RETRY_STATUSES = (429, 503, 504)
+#: The AIP reason strings that mean "you asked without a scope that covers it" are named
+#: in :mod:`.errors`, next to the ``missing_scope`` property that reads them.
+#: The answer that means "the Google account is not linked to a Fitbit account", which
+#: is a first-run fact about the account and not a fault in the request (ADR-0002 §7).
+ACCOUNT_NOT_LINKED = "ACCOUNT_NOT_LINKED"
 
 
 @dataclass
 class RateLimit:
-    """The last rate-limit reading the API gave us, in wall-clock terms."""
+    """The last rate-limit reading the API gave us, in wall-clock terms.
+
+    Kept because it is still *useful* when a response carries one (a proxy or an older
+    gateway may), but it is now an additional signal rather than the mechanism: the
+    v4 API sends none, and a client that only paces itself off headers a service does
+    not send will discover its ceiling by hitting it.
+    """
 
     limit: int | None = None
     remaining: int | None = None
@@ -66,6 +86,55 @@ class RateLimit:
             "reset_in": round(self.reset_in, 1) if self.reset_in is not None else None,
             "scope": self.scope,
         }
+
+
+class TokenBucket:
+    """A local ceiling of ``rate`` requests per second, with a one-second burst.
+
+    Deliberately tiny and self-contained: it owns a clock and a sleep function so an
+    import of ten thousand requests can be tested in milliseconds by handing it both.
+    A bucket - rather than "sleep 200ms between requests" - is what lets a chunk that
+    waited for a retry catch up without going over the minute-long window the API
+    actually measures.
+    """
+
+    def __init__(
+        self,
+        rate: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        capacity: float | None = None,
+    ) -> None:
+        self.rate = max(0.1, float(rate))
+        self.capacity = float(capacity) if capacity else max(1.0, self.rate)
+        self.clock = clock
+        self.sleep = sleep
+        self.tokens = self.capacity
+        self.updated = self.clock()
+        self.waited = 0.0
+        self.waits = 0
+
+    def _refill(self) -> None:
+        now = self.clock()
+        elapsed = max(0.0, now - self.updated)
+        self.updated = now
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+
+    def take(self, cost: float = 1.0) -> float:
+        """Spend one token, waiting if the bucket is empty. Returns the seconds slept."""
+        self._refill()
+        if self.tokens >= cost:
+            self.tokens -= cost
+            return 0.0
+        deficit = cost - self.tokens
+        pause = deficit / self.rate
+        self.sleep(pause)
+        self.waited += pause
+        self.waits += 1
+        self.tokens = 0.0
+        self.updated = self.clock()
+        return pause
 
 
 class ETagCache:
@@ -107,8 +176,8 @@ class ETagCache:
         return len(self._entries)
 
 
-class FitbitClient:
-    """Everything that talks to ``api.fitbit.com`` goes through here."""
+class HealthClient:
+    """Everything that talks to ``health.googleapis.com`` goes through here."""
 
     def __init__(
         self,
@@ -119,6 +188,8 @@ class FitbitClient:
         transport: Any = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], Any] = utcnow,
+        monotonic: Callable[[], float] = time.monotonic,
+        rng: random.Random | None = None,
         etag_cache_path: Path | None = None,
     ) -> None:
         self.api = api or ApiSettings()
@@ -129,14 +200,23 @@ class FitbitClient:
         self.transport = transport if transport is not None else UrllibTransport(timeout=self.api.timeout)
         self.sleep = sleep
         self.clock = clock
+        #: Only used for backoff jitter, so that a test can pin it and a run cannot.
+        self.rng = rng or random.Random()
         self.etags = ETagCache(etag_cache_path)
         self.rate_limit = RateLimit()
-        self.requests = 0
-        self.not_modified = 0
         #: Whether this client's transport can reach a real host (see :mod:`.http`), and
         #: therefore what the retired-source guard in :mod:`.source` binds.
         self.live = bool(getattr(self.transport, "live", False))
-        # Computed once: an import makes thousands of requests against the same three
+        # A fixture replay is not a service to be polite to: the bucket exists to keep a
+        # real host from seeing a burst, and applying it to a ReplayTransport would only
+        # make the test suite slow. Same ``live`` rule as the retired-source guard, so a
+        # stand-in transport is treated as a stand-in in both places.
+        self.bucket = TokenBucket(
+            self.api.requests_per_second if self.live else float("inf"), clock=monotonic, sleep=sleep
+        )
+        self.requests = 0
+        self.not_modified = 0
+        # Computed once: an import makes thousands of requests against the same few
         # endpoints, and re-parsing them per request would be pure overhead on the hot path.
         self._guard_state = source_state.state_of(self.api, settings=source_state.DATA_PLANE_SETTINGS)
         self._tokens: TokenSet | None = self.credentials.load_or_none()
@@ -217,7 +297,7 @@ class FitbitClient:
         self._tokens = refreshed
         log.info(
             "access token refreshed (scopes: %s); valid until %s",
-            ", ".join(refreshed.scopes) or "none reported",
+            ", ".join(short_scope(s) for s in refreshed.scopes) or "none reported",
             refreshed.expires_at.isoformat(timespec="seconds"),
         )
         return refreshed
@@ -232,24 +312,49 @@ class FitbitClient:
         return self.transport.request("POST", url, merged, body)
 
     # --- the verb everything else uses --------------------------------------
-    def get(self, path: str, params: Mapping[str, Any] | None = None) -> Response:
-        """GET ``path`` (relative to ``[api] base_url``), with the politeness rules applied."""
+    def request(
+        self,
+        method: str,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | None = None,
+    ) -> Response:
+        """One API call, with the politeness rules applied.
+
+        ``GET`` carries its window in the query string and may be answered from the ETag
+        cache; ``POST`` - the ``rollUp`` and ``dailyRollUp`` verbs - carries it in a JSON
+        body and is never conditional, because an ETag on an aggregation request would
+        be asserting that a window's contents are immutable.
+        """
+        verb = method.upper()
         url = self._url(path, params)
         self.guard_source()
-        cache_key = url
+        payload: bytes | None = None
+        content_type = "application/json"
+        if body is not None:
+            payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        # A stable digest, not ``hash()``: the ETag cache is a file, and Python's salted
+        # hashes would give every run a different cache full of entries it can never use.
+        cache_key = url if verb == "GET" else f"{verb} {url}:{sha1(payload or b'').hexdigest()[:16]}"
         attempts = max(1, int(self.api.retries) + 1)
         refreshed = False
+        if self._tokens is None and not self.credentials.exists:
+            # Better to say "log in" than to dial the API with no credential and report
+            # the 401 that follows as an API failure.
+            raise NotAuthenticatedError()
         if self._tokens is not None and self._can_refresh() and self.tokens.needs_refresh(self.clock()):
             # Refresh on the schedule, not after a 401: a doomed request is still a request.
             self.ensure_fresh()
         for attempt in range(attempts):
-            self._respect_rate_limit()
+            self._pace()
             headers = dict(self.tokens.authorization_header())
             headers["Accept"] = "application/json"
-            etag = self.etags.etag_for(cache_key)
+            if payload is not None:
+                headers["Content-Type"] = content_type
+            etag = self.etags.etag_for(cache_key) if verb == "GET" else None
             if etag:
                 headers["If-None-Match"] = etag
-            response = self.transport.request("GET", url, headers, None)
+            response = self.transport.request(verb, url, headers, payload)
             self.requests += 1
             self._note_rate_limit(response)
 
@@ -259,14 +364,14 @@ class FitbitClient:
                     self.not_modified += 1
                     log.debug("304 %s", path)
                     return Response(200, cached, response.headers)
-                response = Response(404, b'{"errors":[{"message":"ETag cache lost the body"}]}', response.headers)
+                response = Response(404, b'{"error":{"message":"ETag cache lost the body"}}', response.headers)
 
             if response.status == 401 and not refreshed and self._can_refresh():
                 self.ensure_fresh(force=True)
                 refreshed = True
                 continue
 
-            if response.status == 429 or response.status >= 500:
+            if response.status in RETRY_STATUSES:
                 if attempt + 1 >= attempts:
                     if response.status == 429:
                         raise RateLimitError(
@@ -279,23 +384,58 @@ class FitbitClient:
                         path=path,
                         detail=_error_detail(response),
                     )
-                self.sleep(_backoff(attempt, response))
+                self.sleep(_backoff(attempt, response, self.rng))
                 continue
 
             if not response.ok:
-                raise HTTPError(response.status, f"the API refused {path}", path=path, detail=_error_detail(response))
+                raise HTTPError(
+                    response.status,
+                    f"the API refused {path}",
+                    path=path,
+                    detail=_error_detail(response),
+                    reason=_error_reason(response),
+                )
 
             if etag_header := response.header("ETag"):
                 self.etags.remember(cache_key, etag_header, response.body)
             return response
         raise HTTPError(500, f"no response from {path}", path=path)  # pragma: no cover - loop always returns
 
+    def get(self, path: str, params: Mapping[str, Any] | None = None) -> Response:
+        """GET ``path`` (relative to ``[api] base_url``)."""
+        return self.request("GET", path, params)
+
+    def post(self, path: str, body: Mapping[str, Any] | None = None) -> Response:
+        """POST a JSON body - the only way to ask for a rollup."""
+        return self.request("POST", path, None, body)
+
     def get_json(self, path: str, params: Mapping[str, Any] | None = None) -> Any:
         return self.get(path, params).json()
 
+    def post_json(self, path: str, body: Mapping[str, Any] | None = None) -> Any:
+        return self.post(path, body).json()
+
     def profile(self) -> dict:
-        """The profile call doubles as "who am I, and what may this token see"."""
-        payload = self.get_json("/1/user/-/profile.json")
+        """``users/me/profile`` - who this account is, and since when.
+
+        The legacy client used ``/1/user/-/profile.json`` for the same two jobs: a probe
+        that a token works, and ``memberSinceDate`` for ``--full-history``. v4 keeps both
+        jobs and loses one thing: there is no ``resources`` list, so a scope grant is the
+        only evidence of what an account has (see
+        :func:`fitbit_monitor.api.catalog.permitted_datasets`).
+        """
+        payload = self.get_json("users/me/profile")
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def identity(self) -> dict:
+        """``users/me/identity`` - the ids this token is bound to.
+
+        Any health scope is enough for this call, which is why ``fm auth status`` prints
+        it rather than the profile: profile needs ``profile.readonly``, and a user who
+        declined it is still a user whose identity is worth showing - especially when the
+        failure is ``client_user_mismatch`` on a Personal-mode project.
+        """
+        payload = self.get_json("users/me/identity")
         return dict(payload) if isinstance(payload, dict) else {}
 
     def flush(self) -> None:
@@ -305,11 +445,16 @@ class FitbitClient:
     # --- internals ----------------------------------------------------------
     def _url(self, path: str, params: Mapping[str, Any] | None) -> str:
         clean = path if path.startswith("/") else f"/{path}"
-        if self.api.user_id and self.api.user_id != "-":
-            clean = clean.replace("/user/-/", f"/user/{self.api.user_id}/", 1)
+        user = (self.api.user_id or "me").strip("/")
+        if user != "me":
+            # One swap, at the front of the path: everything in the catalog is written
+            # against `users/me/...` because that is what a single-account tool wants.
+            clean = clean.replace("/users/me/", f"/users/{user}/", 1)
         query = ""
         if params:
-            query = "?" + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+            query = "?" + urllib.parse.urlencode(
+                {k: v for k, v in params.items() if v is not None}, quote_via=urllib.parse.quote
+            )
         return f"{self.api.base_url}{clean}{query}"
 
     def _can_refresh(self) -> bool:
@@ -330,8 +475,20 @@ class FitbitClient:
             scope=interval or self.rate_limit.scope,
         )
 
+    def _pace(self) -> None:
+        """Spend a token from the local bucket, then honour a ceiling the API did state."""
+        self.bucket.take()
+        self._respect_rate_limit()
+
     def _respect_rate_limit(self) -> None:
-        """Stop *before* the ceiling and wait for the reset, within the run's patience."""
+        """Stop *before* a stated ceiling and wait for the reset, within the run's patience.
+
+        The v4 API sends no such ceiling, so on the normal path this does nothing and the
+        local bucket is what keeps the import polite. It stays because a response that
+        *does* carry ``X-RateLimit-*`` - a proxy, a gateway, a future revision - is worth
+        obeying, and because ``[import] rate_limit_reserve`` and ``max_wait_seconds`` are
+        documented knobs that a user is entitled to have mean something.
+        """
         reading = self.rate_limit
         if reading.remaining is None:
             return
@@ -364,41 +521,105 @@ def _int_header(response: Response, name: str) -> int | None:
 
 
 def _reset_in(response: Response) -> float | None:
-    seconds = _int_header(response, "X-RateLimit-Reset")
-    if seconds is not None:
-        return float(seconds)
+    """How long to wait, from whichever of the two headers exists. v4 sends neither,
+    and ``Retry-After`` is the one a Google front door does use."""
     retry_after = response.header("Retry-After")
     if retry_after:
         try:
             return float(retry_after)
         except ValueError:
             return None
-    return None
+    seconds = _int_header(response, "X-RateLimit-Reset")
+    return float(seconds) if seconds is not None else None
 
 
-def _backoff(attempt: int, response: Response) -> float:
+def _backoff(attempt: int, response: Response, rng: random.Random | None = None) -> float:
+    """Exponential backoff with full jitter, or the server's own number if it gave one.
+
+    The jitter is the point: a hundred clients that all sleep ``2**attempt`` after the
+    same 503 retry in lockstep and produce the next one.
+    """
     stated = _reset_in(response)
     if stated:
         return min(60.0, max(1.0, stated))
-    return BACKOFF_BASE_SECONDS * (2**attempt)
+    ceiling = min(60.0, BACKOFF_BASE_SECONDS * (2**attempt))
+    return (rng or random).uniform(0.0, ceiling)
 
 
-def _error_detail(response: Response) -> str | None:
+def _error_envelope(response: Response) -> dict[str, Any]:
+    """The AIP error body, or ``{}``. Best-effort by construction: an error body that
+    does not parse must not become a second, more interesting error."""
     try:
         payload = response.json()
     except Exception:  # noqa: BLE001 - error bodies are best-effort
-        return response.text[:200] or None
-    if isinstance(payload, dict):
-        errors = payload.get("errors")
-        if isinstance(errors, list) and errors:
-            first = errors[0]
-            if isinstance(first, dict):
-                parts = [str(first.get("message") or first.get("errorType") or first), str(first.get("location") or "")]
-                return " ".join(p for p in parts if p).strip()[:200]
-            return str(first)[:200]
-        if payload:
-            return json.dumps(payload)[:200]
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    error = payload.get("error")
+    return dict(error) if isinstance(error, dict) else {}
+
+
+def _error_detail(response: Response) -> str | None:
+    """``UNAUTHENTICATED: Request is missing required authentication credential``.
+
+    The v4 dialect is one AIP-193 envelope - ``error.status``, ``error.message``, and
+    ``error.details[]`` carrying a ``reason`` - where the legacy API used its own
+    ``errors[]`` array with ``errorType``. Reading only the legacy shape is how a real
+    reason gets thrown away: the two are tried in that order, so a body in either
+    dialect still arrives at the CLI with its reason attached.
+    """
+    error = _error_envelope(response)
+    if error:
+        status = str(error.get("status") or "")
+        message = str(error.get("message") or "")
+        text = f"{status}: {message}".strip(": ")
+        return text[:200] or None
+    if isinstance(payload := _legacy_payload(response), list) and payload:
+        first = payload[0]
+        if isinstance(first, dict):
+            parts = [str(first.get("message") or first.get("errorType") or first), str(first.get("location") or "")]
+            return " ".join(p for p in parts if p).strip()[:200]
+        return str(first)[:200]
+    return response.text[:200] or None
+
+
+def _error_reason(response: Response) -> str | None:
+    """The machine-readable reason, for callers that branch on it.
+
+    ``MISSING_OAUTH_SCOPE`` and ``ACCOUNT_NOT_LINKED`` are different conversations with
+    the user than the status code is, and a message truncated for a terminal is not a
+    thing to branch on.
+    """
+    for detail in _error_envelope(response).get("details") or []:
+        if isinstance(detail, dict):
+            reason = detail.get("reason") or (detail.get("metadata") or {}).get("reason")
+            if reason:
+                return str(reason)
     return None
 
 
-__all__ = ["ETagCache", "FitbitClient", "RateLimit"]
+def _legacy_payload(response: Response) -> Any:
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        return None
+    return payload.get("errors") if isinstance(payload, dict) else None
+
+
+#: The legacy name still works, and is still what old scripts import. Renaming the client
+#: is honest - it does not talk to Fitbit - but breaking ``from fitbit_monitor.api.client
+#: import FitbitClient`` in a user's plugin for a name is not, so the alias stays and the
+#: same argument ADR-0002 §9 makes for ``--source api`` applies here.
+FitbitClient = HealthClient
+
+
+__all__ = [
+    "ACCOUNT_NOT_LINKED",
+    "ETagCache",
+    "FitbitClient",
+    "HealthClient",
+    "MISSING_SCOPE_REASONS",
+    "RateLimit",
+    "RETRY_STATUSES",
+    "TokenBucket",
+]

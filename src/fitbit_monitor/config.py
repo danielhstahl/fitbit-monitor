@@ -28,7 +28,7 @@ Layout of the file::
     [api]
     client_id = ""
     redirect_port = 55413
-    scopes = ["profile", "activity", "sleep", "heart_rate", "heart_profile", "spo2"]
+    scopes = ["https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly", "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly", "https://www.googleapis.com/auth/googlehealth.sleep.readonly", "https://www.googleapis.com/auth/googlehealth.profile.readonly"]
 
     [import]
     timezone = "UTC"
@@ -211,25 +211,38 @@ class WebhookSettings:
 
 @dataclass(frozen=True)
 class ApiSettings:
-    """``[api]`` - how ``fm`` talks to the Fitbit web API.
+    """``[api]`` - how ``fm`` talks to the Google Health API.
 
-    ``client_id``/``client_secret`` are what you get when you register the app;
-    ``redirect_port`` has to match the redirect URI you registered *exactly*, which
-    is why it is a setting rather than a constant. ``scopes`` left unset means
-    "everything this build knows how to import".
+    The defaults are the source ADR-0002 decided on: the REST ``v4`` channel at
+    ``health.googleapis.com``, on Google's own OAuth endpoints, with the four
+    ``googlehealth.*`` readonly scopes. ``client_id``/``client_secret`` are what you get
+    when you register the OAuth client in a Google Cloud project; ``redirect_port`` has
+    to match the redirect URI you registered *exactly*, which is why it is a setting
+    rather than a constant. ``scopes`` left unset means "everything this build knows how
+    to import" (:data:`fitbit_monitor.api.catalog.ALL_SCOPES`).
+
+    Pointing ``base_url`` back at ``api.fitbit.com`` is refused rather than dialled: that
+    service was switched off on 2026-11-02 and still answers ``401``, which reads like a
+    bad login and never is one (:mod:`fitbit_monitor.api.source`).
     """
 
-    base_url: str = "https://api.fitbit.com"
-    authorize_url: str = "https://www.fitbit.com/oauth2/authorize"
-    token_url: str = "https://api.fitbit.com/oauth2/token"
+    base_url: str = "https://health.googleapis.com/v4"
+    authorize_url: str = "https://accounts.google.com/o/oauth2/v2/auth"
+    token_url: str = "https://oauth2.googleapis.com/token"
     client_id: str = ""
     client_secret: str = ""
     redirect_host: str = "localhost"
     redirect_port: int = 55413
     scopes: tuple[str, ...] = ()
-    user_id: str = "-"
+    #: The v4 user path segment. ``me`` is the authenticated account; the numeric
+    #: ``healthUserId`` from ``users/getIdentity`` also works, and is what a setup that
+    #: imports more than one account would set here.
+    user_id: str = "me"
     timeout: float = 30.0
     retries: int = 3
+    #: Local polite ceiling, in requests per second. The API allows 300/minute/user and
+    #: publishes no rate-limit headers to pace against, so the client counts its own.
+    requests_per_second: float = 5.0
     credentials_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -262,6 +275,7 @@ class ApiSettings:
             "user_id": self.user_id,
             "timeout": self.timeout,
             "retries": self.retries,
+            "requests_per_second": self.requests_per_second,
         }
 
 
@@ -355,17 +369,18 @@ class AppConfig:
                 timeout=float(webhook.get("timeout_seconds", 10)),
             ),
             api=ApiSettings(
-                base_url=str(_expand(api.get("base_url")) or "https://api.fitbit.com").rstrip("/"),
-                authorize_url=str(api.get("authorize_url") or "https://www.fitbit.com/oauth2/authorize"),
-                token_url=str(api.get("token_url") or "https://api.fitbit.com/oauth2/token"),
+                base_url=str(_expand(api.get("base_url")) or "https://health.googleapis.com/v4").rstrip("/"),
+                authorize_url=str(api.get("authorize_url") or "https://accounts.google.com/o/oauth2/v2/auth"),
+                token_url=str(api.get("token_url") or "https://oauth2.googleapis.com/token"),
                 client_id=str(_expand(api.get("client_id")) or ""),
                 client_secret=str(_expand(api.get("client_secret")) or ""),
                 redirect_host=str(api.get("redirect_host") or "localhost"),
                 redirect_port=int(api.get("redirect_port", 55413)),
                 scopes=tuple(str(s) for s in (_expand(api.get("scopes")) or [])),
-                user_id=str(api.get("user_id") or "-"),
+                user_id=str(api.get("user_id") or "me"),
                 timeout=float(api.get("timeout_seconds", 30)),
                 retries=int(api.get("retries", 3)),
+                requests_per_second=float(api.get("requests_per_second", 5)),
                 credentials_path=Path(_expand(api["credentials_path"])) if api.get("credentials_path") else None,
             ),
             import_=ImportSettings(

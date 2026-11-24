@@ -33,8 +33,9 @@ the fact**, because "it imported" is not an answer anyone can act on.
 `ImportPlanner` turns the CLI's `--since/--until/--dataset/--full-history` into an
 `ImportPlan`: per dataset, the days, the chunks, and a request estimate. `--dry-run`
 prints it and stops; `--json` emits it for scripts. The planner is also where the
-`/1/user/-/profile.json` probe lives: granted scopes plus account resources decide
-what is importable, and everything excluded is excluded **with a printed reason**.
+`users/me/profile` probe lives: granted scopes decide what is importable and the
+membership date decides where `--full-history` starts, and everything excluded is excluded
+**with a printed reason**.
 A failure of the probe itself (rate limit, network) is not fatal - selection falls
 back to the token's scopes.
 

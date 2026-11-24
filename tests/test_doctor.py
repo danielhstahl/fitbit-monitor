@@ -31,6 +31,7 @@ if str(REPO / "src") not in sys.path:  # importable under pytest and under `unit
     sys.path.insert(0, str(REPO / "src"))
 
 from fitbit_monitor.api.auth import CredentialStore, TokenSet  # noqa: E402
+from fitbit_monitor.api.catalog import ALL_SCOPES, HEALTH_METRICS_SCOPE, SLEEP_SCOPE  # noqa: E402
 from fitbit_monitor.cli import main  # noqa: E402
 from fitbit_monitor.cli.common import EXIT_ERROR, EXIT_OK, EXIT_USAGE, Session  # noqa: E402
 from fitbit_monitor.cli.doctor_cmd import (  # noqa: E402
@@ -465,9 +466,10 @@ class ApiProbeCheckTest(DoctorTestCase):
     """
 
     FIXTURES = REPO / "tests" / "fixtures" / "api"
-    #: Inside the recorded window, so the fixtures answer for "today".
-    WHEN = datetime(2026, 5, 8, 12, tzinfo=UTC)
-    CATALOG_SCOPES = ("profile", "activity", "sleep", "heartbeat", "heart_profile", "spo2")
+    #: The last day the recorded corpus answers for, so a probe's newest question lands
+    #: on a fixture instead of on an unrecorded day.
+    WHEN = datetime(2026, 5, 14, 12, tzinfo=UTC)
+    CATALOG_SCOPES = ALL_SCOPES
 
     def setUp(self) -> None:
         super().setUp()
@@ -510,13 +512,15 @@ class ApiProbeCheckTest(DoctorTestCase):
         self.assertTrue(check.detail["probed"])
         self.assertEqual(check.detail["usable"], check.detail["datasets"])
         self.assertEqual(check.detail["blocked"], [])
-        self.assertIsNotNone(check.detail["rate_limit_remaining"])
+        self.assertIsNone(check.detail["rate_limit_remaining"], "v4 sends no rate-limit ceiling to report")
 
     def test_a_missing_scope_warns_and_names_the_scope(self) -> None:
-        self.token_with("profile", "activity", "sleep", "heartbeat")
+        self.token_with(HEALTH_METRICS_SCOPE, SLEEP_SCOPE)
         check = self.api_check(probe=True)
         self.assertEqual(check.status, WARN)
-        self.assertEqual(sorted(check.detail["missing_scopes"]), ["heart_profile", "spo2"])
+        # Only a gap that disables a dataset is worth a doctor line: profile.readonly is
+        # the identity probe, and its absence is a note in the probe report instead.
+        self.assertEqual(sorted(check.detail["missing_scopes"]), ["activity_and_fitness.readonly"])
         self.assertIn("fm api probe", check.hint)
         self.assertNotIn("fail", {check.status})
 

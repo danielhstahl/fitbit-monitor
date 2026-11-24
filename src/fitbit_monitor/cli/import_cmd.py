@@ -78,7 +78,12 @@ def register(sub: "argparse._SubParsersAction") -> None:
     )
     imp.add_argument("--dry-run", action="store_true", help="print the plan and the request cost, fetch nothing")
     imp.add_argument("--full-history", action="store_true", help="start at the account's signup date, not the watermark")
-    imp.add_argument("--source", choices=("api", "csv"), default=None, help="where to import from (default: api)")
+    imp.add_argument(
+        "--source",
+        choices=("api", "health", "csv", "archive"),
+        default=None,
+        help="where to import from (default: api; health and archive are the same two)",
+    )
     imp.add_argument("--path", default=None, help="export ZIP or directory to ingest (implies --source csv)")
     imp.add_argument("--glob", action="append", metavar="PATTERN", help="only CSV files matching this pattern (repeatable)")
     imp.add_argument("--file", action="append", metavar="NAME", help="only this file from the export (repeatable)")
@@ -118,7 +123,9 @@ def register(sub: "argparse._SubParsersAction") -> None:
     report.set_defaults(func=cmd_import_report)
 
     watermarks = isub.add_parser("watermarks", help="where each dataset has been fetched to")
-    watermarks.add_argument("--source", default=None, choices=("api", "csv"), help="only this source")
+    watermarks.add_argument(
+        "--source", default=None, choices=("api", "health", "csv", "archive"), help="only this source"
+    )
     watermarks.add_argument("--json", action="store_true")
     watermarks.set_defaults(func=cmd_import_watermarks)
 
@@ -146,6 +153,18 @@ exit codes:
 """
 
 
+#: ADR-0002 §9 names the two sources ``health`` and ``archive``; the store, the reports
+#: and the first release call them ``api`` and ``csv``. Both names are accepted at the
+#: flag, one name is stored: "api" stopped being a specific answer when there were two
+#: APIs, but rewriting every watermark row to say "health" would buy nothing.
+SOURCE_ALIASES = {"health": "api", "archive": "csv"}
+
+
+def _source(name: str | None) -> str | None:
+    """The stored name for a ``--source`` the user typed."""
+    return None if name is None else SOURCE_ALIASES.get(name, name)
+
+
 class EarlyExit(Exception):
     """A command that finished early with a known code (``--dry-run``, a refusal)."""
 
@@ -155,8 +174,8 @@ class EarlyExit(Exception):
 
 
 def cmd_import(args: argparse.Namespace, session: Session) -> int:
-    source = args.source or ("csv" if args.path else "api")
-    if args.source == "csv" and not args.path:
+    source = _source(args.source) or ("csv" if args.path else "api")
+    if source == "csv" and not args.path:
         raise UsageError("--source csv needs --path <export.zip|dir>")
     datasets = _dataset_list(args.dataset)
     client = None
@@ -489,8 +508,9 @@ def cmd_import_watermarks(args: argparse.Namespace, session: Session) -> int:
         print(f"no store at {session.store_path}; nothing has been imported")
         return EXIT_NO_STORE
     try:
-        marks = Watermarks(store).all(source=args.source)
-        outcomes = RunLog(store).outcomes(args.source)
+        source = _source(args.source)
+        marks = Watermarks(store).all(source=source)
+        outcomes = RunLog(store).outcomes(source)
         if args.json:
             payload = []
             for mark in marks:

@@ -1,0 +1,1 @@
+{"request": {"body": null, "method": "GET", "path": "/users/me/profile", "query": {}}, "response": {"body": {"age": 34, "displayName": "Alex Example", "membershipStartDate": {"day": 8, "month": 11, "year": 2022}, "name": "users/me/profile", "timeZone": "Europe/Berlin"}, "headers": {"Content-Type": "application/json", "ETag": "\"1ad0a0af801a\""}, "status": 200}}

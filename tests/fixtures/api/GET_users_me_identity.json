@@ -1,0 +1,1 @@
+{"request": {"body": null, "method": "GET", "path": "/users/me/identity", "query": {}}, "response": {"body": {"healthUserId": "a1b2c3d4-e5f6-7890-1234-567890abcdef", "legacyUserId": "4412789", "name": "users/me/identity"}, "headers": {"Content-Type": "application/json", "ETag": "\"3296376919cf\""}, "status": 200}}

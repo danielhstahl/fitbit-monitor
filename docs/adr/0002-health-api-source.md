@@ -2,14 +2,16 @@
 
 - **Status:** accepted
 - **Date:** 2026-11-22
-- **Implements:** *forward-looking* - `fitbit_monitor/api/` (client, auth, catalog, http),
-  `[api]` in `config.py`, the `--source` switch in `cli/import_cmd.py`,
-  `fitbit_monitor/ingest/csv_source.py`. **As of this ADR the code still speaks to the
-  legacy Fitbit Web API** (`https://api.fitbit.com`, `/1/user/-/…`, `X-RateLimit-*`),
-  which returns no data (§2). Since 2026-11-23 it *refuses* to dial that host rather than
-  dialling it and misreading the answer (`fitbit_monitor/api/source.py`, exit 6, and
-  `fm api source`), but the port is not done: §10 is the ordered list of what has to
-  change and where, with its status marked.
+- **Implements:** `fitbit_monitor/api/` (client, auth, catalog, http), `[api]` in
+  `config.py`, the `--source` switch in `cli/import_cmd.py`,
+  `fitbit_monitor/ingest/csv_source.py`. **The port landed on 2026-11-23.** The defaults
+  are the four `googlehealth.*` scopes, `https://health.googleapis.com/v4` and
+  `https://oauth2.googleapis.com/token`; the catalog is the §7 map; the client keeps its
+  own 5 req/s ceiling because this API publishes no headers to pace against. The legacy
+  Fitbit Web API is still refused rather than dialled (`fitbit_monitor/api/source.py`,
+  exit 6, `fm api source`), because a `[api]` table left pointing at it must not read as a
+  bad login. §10 is the ordered list, with its status marked - and one item there is still
+  open, honestly.
 - **Related:** ADR-0001 (zero runtime dependencies - it constrains every choice here),
   ADR-0003 (raw retention - the reason a source swap is not a data-loss event),
   ADR-0004 (plugins never learn which source produced a row), ADR-0005 (chunks and
@@ -386,45 +388,77 @@ Three rules, testable and therefore binding:
 ### 10. What has to change, in order
 
 Epic 2 and Epic 4 should need no further source decisions; this list is the whole
-remaining surface. **Status as of 2026-11-23:** one item has landed, and it is the one
-that stops the tool lying to its user - step 2's refusal (see the tick). Everything else
-below is still open, and step 1 gates it: the shapes in §7 have not been confirmed against
-a working Personal-mode project, and writing a client against an unverified API would
-trade a visible refusal for an invisible guess.
+surface. **Status as of 2026-11-23: the port has landed**, except step 1 and the
+`--resolution` half of step 6 - both marked below rather than glossed over. Step 1 is the
+one item that cannot be done from this repository, and it is worth saying what that costs:
+the fixtures in `tests/fixtures/api` are generated from the shapes in §7 by
+`scripts/dev/record_fixtures.py`, so they prove this build is *self-consistent* about
+those shapes and do not prove the analyzer answers that way. The corpus says so itself, in
+`tests/fixtures/api/_provenance.json`.
 
 1. **Verify Personal mode against `health.googleapis.com` once, by hand** (the only
    open assumption, §5). Record the answer in this file. Cost: one afternoon.
+   **Open.** Everything below was built against §7 as written; nothing here has met a
+   live endpoint. What a mismatch would look like: a data type string spelled differently,
+   a civil-time field named something else, a `dailyRollUp` that refuses a 14-day window.
+   Each would be a catalog change in one file, with the fixtures re-recorded behind it -
+   which is the whole reason the catalog is one file.
 2. `config.py`: `[api] base_url` default → `https://health.googleapis.com/v4`; token
    endpoint → `https://oauth2.googleapis.com/token`; scopes default list → the four
    strings from §4; **refuse** a `base_url` under `api.fitbit.com` with the sunset
-   message instead of dialling it. **Partly done 2026-11-23:** the refusal is in,
-   as :mod:`fitbit_monitor.api.source` (`guard`, called before any request by
-   `FitbitClient`, `fm import`, `fm api probe` and `fm auth login`; exit **6**,
-   `fm api source` to inspect it). The defaults are deliberately *not* flipped: until
-   step 5 lands, the paths this client builds are `/1/user/-/…` paths, and pointing
-   them at `health.googleapis.com/v4` would turn a clear refusal into a `404`.
+   message instead of dialling it. **Done 2026-11-23.** The defaults are the decided ones,
+   with `user_id = "me"` as the path segment and a numeric `healthUserId` available for a
+   second account. The refusal - in :mod:`fitbit_monitor.api.source` (`guard`, called
+   before any request by `FitbitClient`, `fm import`, `fm api probe` and `fm auth login`;
+   exit **6**, `fm api source` to inspect it) - is what a config left on the retired host
+   now hits.
 3. `api/auth.py`: Google authorize/token endpoints, `prompt=consent` only when scopes
    change (documented pattern), loopback redirect unchanged, `client_user_mismatch` and
-   the Testing-mode 7-day expiry mapped to distinct messages. *Open.* The PKCE loopback
-   flow itself needs no change, and `fm auth login` now refuses a retired token endpoint
-   before opening the browser.
+   the Testing-mode 7-day expiry mapped to distinct messages. **Done 2026-11-23.** The
+   PKCE loopback flow needed no change; the token plane moved to
+   `oauth2.googleapis.com`, and an `invalid_grant` from a Testing-status client says
+   *re-consent, this is expected after seven days* rather than *your client id is wrong*.
 4. `api/http.py` + `api/client.py`: local 5 req/s token bucket, `Retry-After`, jittered
    backoff on `429/503/504`, `Retry` semantics per AIP error catalog; delete the
-   `X-RateLimit-*` budget or keep it as an *additional* signal.
+   `X-RateLimit-*` budget or keep it as an *additional* signal. **Done 2026-11-23.**
+   The bucket is `[api] requests_per_second`, and it is off for a replay transport -
+   being polite to a fixture is being slow for no reason. `429/503/504` are the retried
+   trio with jitter; a `500` is *not* retried, because AIP reserves it for "the service
+   could not answer this request", which repeating does not fix. `X-RateLimit-*` is kept
+   as an additional signal - parsed and reported verbatim if it ever arrives, absent
+   today, and `fm api probe` says which of the two it is looking at. POST bodies take
+   part in fixture keys (`body_signature`), because five rollup windows otherwise replay
+   as one answer.
 5. `api/catalog.py`: rewrite as the §7 map - data types, endpoint builders
    (`list`/`rollUp`/`dailyRollUp`, filter strings in snake_case, path names in
    kebab-case), normalizers for the new response shapes, chunk sizes = page-safe
-   windows.
+   windows. **Done 2026-11-23.** Two findings from building it, both recorded in the
+   module: `rollUp`'s default page size is not a safe default to lean on, and a
+   `dailyRollUp` of `daily-resting-heart-rate` over a range returns a *personal range*,
+   not the day's value - so resting heart rate comes from the daily list instead.
 6. `cli/import_cmd.py`: `--source health|archive` with `api`/`csv` aliases (same flag,
    same exit codes - ADR-0001's contract is unchanged), `--resolution minute|raw`
-   bounded to a window (§6).
+   bounded to a window (§6). **Partly done 2026-11-23:** both names work at `--source`
+   and the stored name stays `api`/`csv`, so no watermark or report had to change.
+   **`--resolution` is not built:** the catalog pins the 60-second rollup window, and the
+   finer settings are a row-count decision of their own (§6 puts per-second with
+   fitb-cel), not a flag to add before anyone has asked for the rows.
 7. Re-record `tests/fixtures/api` against `v4` with the existing recording transport,
    and re-run `scripts/dev/record_fixtures.py --check`; the replay harness is why steps
-   2-6 are testable without a Google account.
+   2-6 are testable without a Google account. **Done 2026-11-23, with the honest
+   substitution:** there is no Google account to record from, so the corpus is generated
+   by `SyntheticApi` in that script - a stand-in whose docstring lists what it copies from
+   the published shapes and what it invents. `--check` fails if the committed corpus and a
+   fresh generation differ, `tests/test_fixture_corpus.py` asserts that in the suite, and
+   `_provenance.json` states the window, the seed and `"recorded_from": null`. When step 1
+   happens, recording for real means pointing that script at the live API and reading the
+   diff.
 8. Docs: `docs/data-import.md` (setup ladder, the new budget arithmetic, Takeout steps),
-   `README.md` (one line: which API and why), and this file's §10 tick-marks.
+   `README.md` (one line: which API and why), and this file's §10 tick-marks. **Done
+   2026-11-23:** the two-week plan is thirteen requests instead of seventy-three and the
+   docs say so; `docs/data-policy.md` names the endpoints that are actually dialled.
 9. **Do not** add `ecg`/`irn` scopes, webhooks, `v4beta`, or per-second default sampling
-   here. Each is a decision of its own, and three of the four belong to fitb-cel.
+   here. **Held:** none of the four appeared. Each is a decision of its own, and three of the four belong to fitb-cel.
 
 ## Consequences
 

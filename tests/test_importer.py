@@ -16,6 +16,7 @@ import unittest
 from datetime import date
 
 import import_support as fx
+from fitbit_monitor.api.catalog import HEALTH_METRICS_SCOPE, SLEEP_SCOPE
 from fitbit_monitor.api.http import Response
 from fitbit_monitor.errors import UsageError
 from fitbit_monitor.ingest.importer import ImportPlanner, Importer, day_window
@@ -84,21 +85,29 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(plan.probe_requests, 1)
 
     def test_the_cost_of_the_two_week_pull_is_planned_before_it_is_spent(self) -> None:
+        # Thirteen requests for two weeks of five datasets: one profile probe, four daily
+        # rollups plus a resting-HR list, three heart-rate windows, one HRV list, two sleep
+        # pages and one SpO2 list. The legacy per-day endpoints cost 73 for the same
+        # window, which is the whole reason ADR-0002 §6 sizes windows instead of days.
         plan = self.planner.build(**WINDOW)
-        self.assertEqual(plan.requests, 73, "58 chunks, one endpoint each except daily_summary (2/day) and hrv (1/week)")
-        self.assertEqual(plan.dataset("daily_summary").requests, 28)
-        self.assertEqual(plan.dataset("hrv").requests, 2)
-        self.assertEqual(plan.dataset("hrv").chunk_days, 7)
-        self.assertEqual(len(plan.dataset("hrv").chunks), 2)
-        self.assertIn("73", " ".join(plan.describe()))
-        self.assertEqual(plan.as_dict()["requests_estimate"], 73)
+        self.assertEqual(plan.requests, 13)
+        self.assertEqual(plan.dataset("daily_summary").requests, 5)
+        self.assertEqual(plan.dataset("heart_rate").requests, 3)
+        self.assertEqual(plan.dataset("hrv").requests, 1)
+        self.assertEqual(plan.dataset("hrv").chunk_days, 14)
+        self.assertEqual(len(plan.dataset("hrv").chunks), 1)
+        self.assertIn("13", " ".join(plan.describe()))
+        self.assertEqual(plan.as_dict()["requests_estimate"], 13)
 
     def test_scopes_decide_what_is_imported_and_the_reason_is_said(self) -> None:
-        env = fx.Environment(scopes=("profile", "activity", "sleep"))
+        env = fx.Environment(scopes=(HEALTH_METRICS_SCOPE, SLEEP_SCOPE))
         self.addCleanup(env.cleanup)
         plan = ImportPlanner(env.client, env.watermarks).build(**WINDOW)
-        self.assertEqual([d.dataset for d in plan.datasets], ["daily_summary", "sleep"])
-        self.assertTrue(any("spo2" in note for note in plan.notes))
+        self.assertEqual([d.dataset for d in plan.datasets], ["heart_rate", "hrv", "sleep", "spo2"])
+        self.assertTrue(
+            any("daily_summary" in note and "activity_and_fitness" in note for note in plan.notes),
+            "the skip names the scope that was missing, on the dataset that needed it",
+        )
 
     def test_an_explicit_dataset_list_bypasses_the_probe_but_not_validation(self) -> None:
         plan = self.planner.build(datasets=["heart_rate"], **WINDOW)
@@ -115,7 +124,10 @@ class PlannerTest(unittest.TestCase):
         heart = plan.dataset("heart_rate")
         self.assertEqual(len(heart.chunks), 2)
         self.assertEqual(heart.chunks[0].label, "2026-05-01..2026-05-07")
-        self.assertEqual(heart.requests, 14, "still one request per day, just committed together")
+        # A 7-day chunk is still two rollups, because the endpoint's page-safe window is
+        # six days: the chunk is the unit of *durability*, the window is the unit of the
+        # request, and the two do not have to agree.
+        self.assertEqual(heart.requests, 4)
 
     def test_no_since_starts_at_the_recent_default_and_says_so(self) -> None:
         plan = self.planner.build(until=fx.UNTIL)
@@ -140,7 +152,7 @@ class PlannerTest(unittest.TestCase):
         plan = self.planner.build(until=fx.UNTIL, resume_from=date(2026, 5, 1))
         summary = plan.dataset("daily_summary")
         self.assertEqual(summary.since, date(2026, 5, 2), "one day of overlap, then everything onwards")
-        self.assertEqual(len(summary.chunks), 13)
+        self.assertEqual(len(summary.chunks), 1, "a 13-day tail is still inside one daily chunk")
 
     def test_the_overlap_window_re_reads_recent_days_to_catch_late_corrections(self) -> None:
         from fitbit_monitor.config import ImportSettings
@@ -217,7 +229,7 @@ class ImporterTest(unittest.TestCase):
         self.assertEqual(report.exit_code, EXIT_OK)
         for dataset, expected in fx.EXPECTED_ROWS.items():
             self.assertEqual(self.env.store.count(dataset), expected, dataset)
-        self.assertEqual(self.env.client.requests, 73)
+        self.assertEqual(self.env.client.requests, 13)
         self.assertEqual(self.env.store.count(), sum(fx.EXPECTED_ROWS.values()))
 
     def test_every_dataset_reports_its_range_chunks_and_watermark(self) -> None:
@@ -233,13 +245,41 @@ class ImporterTest(unittest.TestCase):
                 self.assertEqual(entry.chunks_fetched, entry.chunks_planned)
                 self.assertGreater(entry.bytes_stored, 0)
 
-    def test_a_day_with_no_data_is_reported_as_information_not_failure(self) -> None:
+    def test_a_day_with_no_data_lands_no_rows_and_no_warning(self) -> None:
+        """v4 answers an empty period with an empty page, not a 404.
+
+        So the old "day missing from the corpus" case is now "the window came back shorter
+        than it was asked for": 13 of the 14 days have heart rate, and nothing about that
+        is a warning, because there is nothing to warn about.
+        """
         report = self.run_import()
         heart = report.dataset("heart_rate")
         self.assertEqual(heart.status, "ok")
         self.assertEqual(report.exit_code, EXIT_OK)
-        self.assertTrue(any("2026-05-05" in note and "404" in note for note in heart.info))
-        self.assertEqual(heart.notes, [], "a 404 day is not a warning")
+        self.assertEqual(heart.rows_inserted, 13 * 288, "every day except 2026-05-05")
+        self.assertEqual(heart.notes, [])
+        self.assertEqual(heart.info, [])
+
+    def test_a_refusal_for_scope_is_a_reported_gap_not_a_failed_import(self):
+        """Partial consent: one data type the token cannot see must not fail the dataset.
+
+        Google's rule for a withheld scope is that the app keeps working on the streams it
+        was given; a chunk that died over one refused data type would throw away the good
+        half of the same response set.
+        """
+        refused = Response(
+            403,
+            b'{"error":{"code":403,"status":"PERMISSION_DENIED","message":"no scope","details":'
+            b'[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MISSING_OAUTH_SCOPE"}]}}',
+        )
+        report = self.run_import(
+            transport=WrapTransport(lambda path: refused if "daily-resting-heart-rate" in path else None)
+        )
+        summary = report.dataset("daily_summary")
+        self.assertEqual(summary.status, "ok", "the four rollups that answered still land")
+        self.assertGreater(summary.rows_inserted, 0)
+        self.assertTrue(any("MISSING_OAUTH_SCOPE" in note for note in summary.info), summary.info)
+        self.assertEqual(self.env.store.count("daily_summary"), fx.EXPECTED_ROWS["daily_summary"])
 
     def test_re_running_the_same_window_adds_nothing(self) -> None:
         self.run_import()
@@ -262,9 +302,9 @@ class ImporterTest(unittest.TestCase):
     def test_progress_is_reported_per_dataset_and_chunk(self) -> None:
         self.run_import()
         self.assertEqual(sorted(self.progress.started), ["daily_summary", "heart_rate", "hrv", "sleep", "spo2"])
-        self.assertEqual(len(self.progress.chunks), 58)
+        self.assertEqual(len(self.progress.chunks), 8)
         self.assertEqual(self.progress.chunks[0][1], 1)
-        self.assertIsNotNone(self.progress.remaining, "rate-limit budget is surfaced as progress")
+        self.assertIsNone(self.progress.remaining, "v4 sends no rate-limit ceiling to surface")
         self.assertEqual(len(self.progress.finished), 5)
 
     def test_watermarks_are_per_dataset_and_move_only_over_fetched_days(self) -> None:
@@ -282,15 +322,18 @@ class ImporterTest(unittest.TestCase):
 
     # --- failure paths ------------------------------------------------------
     def test_a_dataset_the_token_cannot_read_fails_alone(self) -> None:
-        forbidden = Response(403, b'{"errors":[{"message":"You do not have permission for hrv"}]}')
+        forbidden = Response(
+            403,
+            b'{"error":{"code":403,"status":"PERMISSION_DENIED","message":"You do not have permission for hrv"}}',
+        )
         report = self.run_import(
-            transport=WrapTransport(lambda path: forbidden if "/hrv/" in path else None)
+            transport=WrapTransport(lambda path: forbidden if "daily-heart-rate-variability" in path else None)
         )
         self.assertEqual(report.status, "partial")
         self.assertEqual(report.exit_code, EXIT_PARTIAL_FAILURE)
         hrv = report.dataset("hrv")
         self.assertEqual(hrv.status, "failed")
-        self.assertIn("permission", hrv.error)
+        self.assertIn("PERMISSION_DENIED", hrv.error)
         self.assertEqual(self.env.store.count("heart_rate"), fx.EXPECTED_ROWS["heart_rate"])
 
     def test_everything_forbidden_is_a_total_failure(self) -> None:
@@ -302,49 +345,54 @@ class ImporterTest(unittest.TestCase):
 
     def test_a_rate_limit_stops_the_run_and_says_re_run(self) -> None:
         soon = Response(429, b"", {"Retry-After": "1"})
-        far = Response(200, b"{}", {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "86400"})
-        report = self.run_import(transport=WrapTransport(lambda path: far if "/heart/date/" in path else soon))
+        report = self.run_import(transport=WrapTransport(lambda path: soon if "heart-rate" in path else None))
         self.assertIn("rate limit", " ".join(report.notes).lower())
         self.assertIn(report.exit_code, (EXIT_PARTIAL_FAILURE, EXIT_TOTAL_FAILURE))
         self.assertEqual(self.env.store.count("heart_rate"), 0, "the aborted dataset stored nothing")
 
     def test_ctrl_c_leaves_the_completed_chunks_stored(self) -> None:
-        # Call 30 of: profile probe (1) + all of daily_summary (28) + heart_rate's first
-        # day (1), so the interrupt lands before heart_rate's second chunk is fetched.
-        report = self.run_import(transport=WrapTransport(None, interrupt_after=30))
+        # Call 7 of: profile probe (1) + all of daily_summary (5) + heart_rate's first
+        # window (1), so the interrupt lands as heart_rate's second window is asked for.
+        report = self.run_import(transport=WrapTransport(None, interrupt_after=7))
         self.assertEqual(report.status, "interrupted")
         self.assertEqual(report.exit_code, EXIT_INTERRUPTED)
         stored = self.env.counts()
         self.assertEqual(stored.get("daily_summary"), fx.EXPECTED_ROWS["daily_summary"], "finished datasets survive")
-        self.assertEqual(self.env.store.count("heart_rate"), 288, "one whole day, no partial day")
+        # The first window is six days, and one of them (2026-05-05) has no data, so a
+        # whole window is five days of buckets - not a torn sixth of one.
+        self.assertEqual(self.env.store.count("heart_rate"), 5 * 288, "one whole window, no partial window")
         self.assertEqual(self.env.store.count("hrv"), 0, "never started")
         mark = self.env.watermarks.get("heart_rate", "api")
-        self.assertEqual(mark.last_day, date(2026, 5, 1), "the watermark says where to resume")
+        self.assertEqual(mark.last_day, date(2026, 5, 6), "the watermark says where to resume")
         interrupted = report.dataset("heart_rate")
         self.assertEqual(interrupted.status, "interrupted")
         self.assertIn("interrupted during chunk", " ".join(interrupted.notes))
         self.assertIn("--resume", " ".join(interrupted.notes))
 
     def test_max_requests_bounds_the_run_and_notes_the_resume(self) -> None:
-        report = self.run_import(max_requests=30)
+        report = self.run_import(max_requests=5)
         self.assertIn(report.exit_code, (EXIT_OK, EXIT_PARTIAL_FAILURE, EXIT_WITH_WARNINGS))
-        self.assertLessEqual(self.env.client.requests, 31)
+        self.assertLessEqual(self.env.client.requests, 6)
         notes = " ".join(" ".join(d.notes) for d in report.datasets)
         self.assertIn("--max-requests", notes)
 
     def test_a_payload_that_is_not_json_is_quarantined_and_warned(self) -> None:
-        junk = Response(200, b"<html>rate limited page</html>", {"X-RateLimit-Remaining": "99"})
-        report = self.run_import(transport=WrapTransport(lambda path: junk if "/spo2/" in path else None))
+        junk = Response(200, b"<html>rate limited page</html>")
+        report = self.run_import(
+            transport=WrapTransport(lambda path: junk if "daily-oxygen-saturation" in path else None)
+        )
         spo2 = report.dataset("spo2")
-        self.assertEqual(spo2.quarantined, 14, "every spo2 response was unusable, including the recorded 404")
+        self.assertEqual(spo2.quarantined, 1, "the one spo2 request answered HTML")
         self.assertEqual(spo2.rows_inserted, 0)
         self.assertEqual(report.exit_code, EXIT_WITH_WARNINGS)
         self.assertIn("not JSON", " ".join(spo2.notes))
-        self.assertEqual(self.env.ingest.quarantine_count("spo2"), 14)
+        self.assertEqual(self.env.ingest.quarantine_count("spo2"), 1)
 
     def test_a_normalizer_bug_does_not_lose_the_raw_payload(self) -> None:
-        odd = Response(200, b'{"spo2": [{"startTime": "not-a-date"}]}', {"X-RateLimit-Remaining": "99"})
-        report = self.run_import(transport=WrapTransport(lambda path: odd if "/spo2/" in path else None))
+        odd = Response(200, b'{"dataPoints": [{"dailyOxygenSaturation": {"date": "not-a-date"}}]}')
+        report = self.run_import(
+            transport=WrapTransport(lambda path: odd if "daily-oxygen-saturation" in path else None)
+        )
         self.assertEqual(report.dataset("spo2").rows_inserted, 0)
         stored = self.env.store.conn.execute("SELECT COUNT(*) AS n FROM raw_payload WHERE dataset='spo2'").fetchone()["n"]
         self.assertEqual(stored, 1, "the identical body is kept once, and it is kept")

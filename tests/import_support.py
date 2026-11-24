@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 from fitbit_monitor.api.auth import CredentialStore, TokenSet
+from fitbit_monitor.api.catalog import ALL_SCOPES
 from fitbit_monitor.api.client import FitbitClient
 from fitbit_monitor.api.http import ReplayTransport, Response
 from fitbit_monitor.config import ApiSettings, ImportSettings
@@ -27,15 +28,23 @@ FIXTURES = REPO / "tests" / "fixtures" / "api"
 SINCE = "2026-05-01"
 UNTIL = "2026-05-14"
 
-ALL_SCOPES = ("profile", "activity", "sleep", "heartbeat", "heart_profile", "spo2")
+#: The four ``googlehealth.*`` scopes a working setup grants (ADR-0002 §4). Imported
+#: rather than restated, so a scope rename cannot leave the fixtures claiming something
+#: the catalog no longer asks for.
+ALL_SCOPES = tuple(ALL_SCOPES)
 
 #: What the recorded fixtures are expected to land (asserted in the e2e test).
+#:
+#: The counts are the corpus's, not the API's: ``heart_rate`` is 13 days of the 5-minute
+#: recording cadence, and the two days missing from ``heart_rate`` and ``spo2`` are absent
+#: from the answer rather than answered with a 404 - which is how v4 reports a period with
+#: nothing in it (ADR-0002 §6).
 EXPECTED_ROWS = {
-    "heart_rate": 3744,  # 13 days x 288 points (2026-05-05 is a recorded 404)
-    "daily_summary": 14,
+    "heart_rate": 3744,  # 13 days x 288 buckets (no data on 2026-05-05)
+    "daily_summary": 14,  # one row a day, merged from five data types
     "hrv": 14,
     "sleep": 16,  # 14 nights plus 2 naps
-    "spo2": 13,  # one recorded 404
+    "spo2": 13,  # no data on 2026-05-09
 }
 
 
@@ -52,13 +61,26 @@ def write_credentials(path: Path, *, scopes: Iterable[str] = ALL_SCOPES, expires
 
 
 def replay_transport(extra: dict[str, dict] | None = None, *, drop: tuple[str, ...] = ()) -> ReplayTransport:
-    """The recorded fixtures, optionally patched (see ``patched``/``drop`` helpers)."""
+    """The recorded fixtures, optionally patched.
+
+    ``drop`` names exact fixture keys to remove ("pretend that day was never recorded").
+    ``extra`` adds or replaces records; a key with no ``?`` names an *endpoint* rather
+    than a request, and replaces every recorded answer for it - which is what a test
+    wants when it says "the SpO2 data type answers 403", since v4 addresses a period in
+    the query, not in the path.
+    """
     from fitbit_monitor.api.http import load_fixtures
 
     fixtures = load_fixtures(FIXTURES)
     for key in drop:
         fixtures.pop(key, None)
-    fixtures.update(extra or {})
+    extra = extra or {}
+    for key, value in extra.items():
+        if "?" in key:
+            continue
+        for recorded in [k for k in fixtures if k.split("?", 1)[0] == key]:
+            del fixtures[recorded]
+    fixtures.update(extra)
     return ReplayTransport(fixtures)
 
 

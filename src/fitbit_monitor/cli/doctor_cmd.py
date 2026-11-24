@@ -50,6 +50,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .. import __version__
 from ..api.auth import CredentialStore
+from ..api.catalog import short_scope
 from ..api.errors import SourceRetiredError
 from ..api.probe import run_probe
 from ..api.source import DECISION_DOC, LEGACY_SUNSET, state_of
@@ -490,7 +491,7 @@ def check_api(ctx: Context) -> Check:
         "requests": report.requests,
         "usable": len(report.usable),
         "datasets": len(report.datasets),
-        "missing_scopes": [gap.scope for gap in report.missing_scopes if gap.datasets],
+        "missing_scopes": [short_scope(gap.scope) for gap in report.missing_scopes if gap.datasets],
         "rate_limit_remaining": report.rate_limit.get("remaining"),
         "blocked": [item.dataset for item in report.datasets if not item.usable],
     }

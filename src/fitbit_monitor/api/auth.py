@@ -1,9 +1,12 @@
-"""OAuth2 + PKCE against Fitbit, and the file the tokens live in.
+"""OAuth2 + PKCE against Google, and the file the tokens live in.
 
-Fitbit's desktop-app flow is authorization-code + PKCE with a loopback redirect: the
-browser does the consent, the code comes back to ``http://localhost:<port>/``, and
-the token exchange is a plain form POST. Nothing here needs a public URL, a
-third-party service, or a browser on a machine that also has the store.
+Google's desktop-app flow is authorization-code + PKCE with a loopback redirect: the
+browser does the consent at ``accounts.google.com``, the code comes back to
+``http://localhost:<port>/``, and the token exchange is a plain form POST to
+``oauth2.googleapis.com/token``. Nothing here needs a public URL, a third-party service,
+or a browser on a machine that also has the store - which is the only reason a
+loopback redirect is allowed at all ("For testing, you can specify URIs that refer to the
+local machine, such as ``http://localhost:8080``").
 
 Three rules this module holds to:
 
@@ -12,6 +15,20 @@ Three rules this module holds to:
 * the *client* secret comes from ``config.toml`` and is never written anywhere by
   this program;
 * every error a user has to act on names ``fm auth login`` in its hint.
+
+Two ways Google's OAuth differs from the Fitbit one this code replaced, and both are the
+kind that only bites at 3am:
+
+* **A refresh token is not returned forever.** Google hands one out when consent is first
+  given (or when ``prompt=consent`` forces the screen) and does *not* rotate it on a
+  refresh: a refresh response normally carries only an access token. Overwriting the
+  stored refresh token with the empty string the response did not send would therefore
+  lock the user out an hour later, so :func:`refresh` carries the old one forward.
+* **Access tokens expire in about an hour, and a withheld consent looks like a bad
+  grant.** ``invalid_grant`` means revoked, expired, or - on an OAuth client in Testing
+  status - past Google's seven-day authorisation expiry, and the only fix for all three
+  is ``fm auth login``; ``invalid_client`` means the id and secret in ``config.toml`` do
+  not match, which no login can fix. They are separate messages for that reason.
 """
 
 from __future__ import annotations
@@ -38,6 +55,16 @@ from .http import Response
 
 REDIRECT_PATH = "/"
 REFRESH_SKEW = timedelta(minutes=5)
+
+#: Google's authorize and token endpoints. Named here so a test, a docs check and a
+#: headless ``--manual`` run all agree on what the default is.
+GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+#: OAuth ``error`` codes that mean "this consent is dead" - revoked, expired, or seven
+#: days old on a Testing-status client - as opposed to "you typed the wrong client id".
+RECONSENT_ERRORS = frozenset({"invalid_grant", "expired_token", "invalid_token"})
+CLIENT_ERRORS = frozenset({"invalid_client", "unauthorized_client", "invalid_client_id"})
 
 
 def _b64url(data: bytes) -> str:
@@ -70,23 +97,37 @@ class PkceFlow:
         client_id: str,
         redirect_uri: str,
         scopes: tuple[str, ...],
-        authorize_url: str = "https://www.fitbit.com/oauth2/authorize",
+        authorize_url: str = GOOGLE_AUTHORIZE_URL,
+        consent: bool = False,
     ) -> str:
-        """The URL to open in a browser. ``scope`` is space-delimited, per the spec."""
+        """The URL to open in a browser. ``scope`` is space-delimited, per the spec.
+
+        ``access_type=offline`` is what buys a refresh token at all - without it Google
+        issues an access token and nothing to renew it with, which an import would only
+        discover an hour in.
+
+        ``consent=True`` adds ``prompt=consent``, which re-shows the consent screen and
+        is the documented way to pick up changed scopes. It is deliberately opt-in: sent
+        on every login it means a user who simply runs ``fm auth login`` gets a screen
+        Google tells them to be suspicious of, so the caller sets it when the scopes on
+        the stored token are not the scopes being asked for now.
+        """
         if not scopes:
             raise UsageError("no scopes requested", hint="set [api] scopes in config.toml")
-        query = urllib.parse.urlencode(
-            {
-                "response_type": "code",
-                "client_id": client_id,
-                "redirect_uri": redirect_uri,
-                "scope": " ".join(scopes),
-                "state": self.state,
-                "code_challenge": self.code_challenge,
-                "code_challenge_method": "S256",
-            }
-        )
-        return f"{authorize_url}?{query}"
+        fields = {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": " ".join(scopes),
+            "state": self.state,
+            "code_challenge": self.code_challenge,
+            "code_challenge_method": "S256",
+            "access_type": "offline",
+            "include_granted_scopes": "true",
+        }
+        if consent:
+            fields["prompt"] = "consent"
+        return f"{authorize_url}?{urllib.parse.urlencode(fields)}"
 
 
 @dataclass(frozen=True)
@@ -246,6 +287,7 @@ def _post_token(
     client_secret: str,
     fields: Mapping[str, str],
     now: datetime,
+    keep_refresh_token: str = "",
 ) -> TokenSet:
     body = urllib.parse.urlencode(fields).encode("ascii")
     response: Response = transport.request(
@@ -259,16 +301,18 @@ def _post_token(
         body,
     )
     if not response.ok:
-        detail = _error_detail(response)
-        raise CredentialsExpiredError(f"the token endpoint refused the request: HTTP {response.status} {detail}")
+        raise _token_error(response)
     payload = response.json()
     if not isinstance(payload, dict) or not payload.get("access_token"):
         raise CredentialsExpiredError("the token endpoint returned no access token")
     expires_in = float(payload.get("expires_in") or 28800)
     scopes = payload.get("scope") or ""
+    issued = str(payload.get("refresh_token") or "") or keep_refresh_token
+    if issued:
+        logsecrets.remember(issued)
     return TokenSet(
         access_token=str(payload["access_token"]),
-        refresh_token=str(payload.get("refresh_token") or ""),
+        refresh_token=issued,
         expires_at=ensure_utc(now) + timedelta(seconds=expires_in),
         scopes=tuple(str(s) for s in (scopes.split() if isinstance(scopes, str) else list(scopes))),
         token_type=str(payload.get("token_type") or "Bearer"),
@@ -277,7 +321,50 @@ def _post_token(
     )
 
 
+def _token_error(response: Response) -> CredentialsExpiredError:
+    """A refusal from the token endpoint, in the dialect that says what to do next.
+
+    Google's OAuth errors are ``{"error": "invalid_grant", "error_description": ...}``,
+    where the legacy endpoint used ``{"errors": [{"errorType": ...}]}``; both are read,
+    and the distinction that matters is *whose* problem it is. ``invalid_grant`` is the
+    user's and one command fixes it; ``invalid_client`` is the config's, and telling
+    somebody to ``fm auth login`` against a client id that does not exist is the same
+    loop the retired-host guard exists to break.
+    """
+    code, description = _oauth_error(response)
+    if code in CLIENT_ERRORS:
+        return CredentialsExpiredError(
+            f"the OAuth client was refused: {code}{' ' + description if description else ''}".strip(),
+        )
+    if code in RECONSENT_ERRORS:
+        return CredentialsExpiredError(
+            f"the stored consent is no longer valid: {code}{' ' + description if description else ''}".strip()
+        )
+    detail = description or code or _error_detail(response)
+    return CredentialsExpiredError(f"the token endpoint refused the request: HTTP {response.status} {detail}".strip())
+
+
+def _oauth_error(response: Response) -> tuple[str | None, str]:
+    """``(error, error_description)`` from either dialect, or ``(None, "")``."""
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001 - a body we cannot parse is not worth a traceback
+        return None, response.text[:200]
+    if not isinstance(payload, dict):
+        return None, ""
+    code = payload.get("error") or payload.get("errorType")
+    description = str(payload.get("error_description") or payload.get("message") or "")
+    if not code and payload.get("errors"):
+        first = payload["errors"][0]
+        if isinstance(first, dict):
+            code, description = first.get("errorType"), str(first.get("message") or description)
+    return (str(code) if code else None), description[:200]
+
+
 def _error_detail(response: Response) -> str:
+    code, description = _oauth_error(response)
+    if code:
+        return f"{code} {description}".strip()[:200]
     try:
         payload = response.json()
     except Exception:  # noqa: BLE001 - a body we cannot parse is not worth a traceback
@@ -326,8 +413,14 @@ def refresh(
     refresh_token: str,
     now: datetime | None = None,
 ) -> TokenSet:
-    """Refresh an access token. Fitbit rotates refresh tokens, so the result replaces
-    the whole :class:`TokenSet`, not just the access token."""
+    """Refresh an access token.
+
+    Google does not rotate refresh tokens the way the legacy API did: a refresh reply
+    usually carries only an access token, so the stored refresh token is carried forward
+    when the response does not name a new one. Writing the empty string there would look
+    like a successful refresh and leave nothing to renew with an hour later - a renewal
+    that fails quietly is the one failure an import cannot recover from by itself.
+    """
     if not refresh_token:
         raise CredentialsExpiredError("the stored credentials have no refresh token")
     return _post_token(
@@ -337,6 +430,7 @@ def refresh(
         client_secret=client_secret,
         fields={"grant_type": "refresh_token", "refresh_token": refresh_token},
         now=now or utcnow(),
+        keep_refresh_token=refresh_token,
     )
 
 

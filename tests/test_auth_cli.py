@@ -21,6 +21,7 @@ from test_cli import CliTestCase
 
 from import_support import FIXTURES, write_credentials
 from fitbit_monitor.api.auth import CredentialStore, TokenSet
+from fitbit_monitor.api.catalog import ALL_SCOPES
 from fitbit_monitor.cli.common import EXIT_USAGE
 from fitbit_monitor.errors import UsageError
 from fitbit_monitor.ingest.report import EXIT_OK
@@ -129,10 +130,18 @@ class AuthCliTest(CliTestCase):
         code, text = self.fm("auth", "status", "--json", expect=EXIT_OK)
         payload = json.loads(text)
         self.assertTrue(payload["authenticated"])
-        self.assertIn("heartbeat", payload["scopes"])
+        # The JSON is the verbatim view: scope URLs exactly as Google spells them.
+        self.assertEqual(set(payload["scopes"]), set(ALL_SCOPES))
         self.assertFalse(payload["expired"])
         self.assertAlmostEqual(payload["seconds_left"], tokens.seconds_left(), delta=60)
         self.assertNotIn("access_token", json.dumps(payload), "the public view has no secrets")
+
+    def test_status_prints_scopes_short_enough_to_read(self) -> None:
+        """Four 70-character URLs on one line is not a status line."""
+        write_credentials(self.credentials_path)
+        _code, text = self.fm("auth", "status", expect=EXIT_OK)
+        self.assertIn("health_metrics_and_measurements.readonly", text)
+        self.assertNotIn("https://www.googleapis.com/auth/googlehealth", text)
 
     def test_status_says_when_the_token_needs_a_refresh(self) -> None:
         write_credentials(self.credentials_path, expires_in=120)

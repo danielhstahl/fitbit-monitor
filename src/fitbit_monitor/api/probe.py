@@ -6,15 +6,18 @@ given, a dataset the account does not have (no Pulse Ox, no tracker), a rate lim
 endpoint that answered something unexpected. Every one of them is answerable by *asking
 the API*, which is what this module does in a bounded number of requests:
 
-1. **Who am I** - one ``profile.json`` call, read for identity and ``resources`` only
-   (no measurements are copied out of it, see :mod:`fitbit_monitor.logsafe`).
+1. **Who am I** - one ``users/me/profile`` call (membership date, age) and one
+   ``users/me/identity`` call (the ``healthUserId``, and the Fitbit-era id next to it, so
+   a ``client_user_mismatch`` is legible). No measurements are copied out of either - see
+   :mod:`fitbit_monitor.logsafe`.
 2. **What may I see** - the token's granted scopes against the scopes the catalog wants,
    naming each missing one and the datasets it disables.
 3. **What is there** - one request per dataset for the newest day, then a *doubling walk*
    back through history (1, 2, 4, 8 ... days, then the floor) so the earliest date of
    available data is bounded in ``log2(days)`` requests instead of one per day.
-4. **What is left** - the rate-limit headers observed along the way, and when the window
-   resets.
+4. **What is left** - whatever rate-limit headers turned up along the way (the v4 API
+   sends none, and saying so is itself a finding), and the local ceiling the client is
+   holding itself to.
 
 Two rules make this usable as a diagnostic rather than a stack trace:
 
@@ -37,7 +40,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..timeutil import utcnow
-from .catalog import ALL_SCOPES, CATALOG, Dataset, Payload, lookup
+from .catalog import ALL_SCOPES, CATALOG, Dataset, Payload, lookup, perform, short_scope
 from .client import FitbitClient
 from .errors import APIUnavailableError, FitbitAPIError, HTTPError, RateLimitError
 
@@ -129,9 +132,9 @@ class ScopeGap:
         }
 
     def line(self) -> str:
-        disabled = ", ".join(self.datasets) or "no dataset in the catalog (profile only: identity and resources)"
+        disabled = ", ".join(self.datasets) or "no dataset in the catalog (profile.readonly is identity only)"
         extra = "" if self.requested else " - never asked for: set [api] scopes, then run `fm auth login`"
-        return f"missing {self.scope} - disables: {disabled}{extra}"
+        return f"missing {short_scope(self.scope)} - disables: {disabled}{extra}"
 
 
 @dataclass
@@ -140,7 +143,6 @@ class DatasetProbe:
 
     dataset: str
     scope: str
-    resource: str | None = None
     status: str = UNKNOWN
     http_status: int | None = None
     requests: int = 0
@@ -150,8 +152,6 @@ class DatasetProbe:
     history: str = HISTORY_NOT_SEARCHED
     #: Newest sampled day that came back empty while walking back (the lower bound).
     starts_after: date | None = None
-    #: ``profile.resources`` said so (None: the profile did not say either way).
-    resource_listed: bool | None = None
     #: The floor the walk reached, when it reached one (member-since, ``--since``...).
     floor: str = ""
     message: str = ""
@@ -169,7 +169,6 @@ class DatasetProbe:
         return {
             "dataset": self.dataset,
             "scope": self.scope,
-            "resource": self.resource,
             "status": self.status,
             "usable": self.usable,
             "http_status": self.http_status,
@@ -179,7 +178,6 @@ class DatasetProbe:
             "latest": self.latest.isoformat() if self.latest else None,
             "history": self.history,
             "starts_after": self.starts_after.isoformat() if self.starts_after else None,
-            "resource_listed": self.resource_listed,
             "floor": self.floor or None,
             "message": self.reason,
         }
@@ -270,24 +268,27 @@ class ProbeReport:
         """The human report: the same facts, in the order a person reads them."""
         out: list[str] = []
         account = self.account
-        named = account.get("display_name") or account.get("user_id") or "unknown account"
+        named = account.get("health_user_id") or account.get("legacy_user_id") or "unknown account"
         since_text = f", member since {account['member_since']}" if account.get("member_since") else ""
-        out.append(f"account   {named} (user {account.get('user_id') or '-'}){since_text}")
-        if account.get("resources"):
-            out.append(f"          resources: {', '.join(account['resources'])}")
+        out.append(f"account   {named}{since_text}")
+        if account.get("legacy_user_id"):
+            out.append(f"          fitbit-era id: {account['legacy_user_id']}")
         if self.profile_error:
             out.append(f"          profile probe failed: {self.profile_error}")
-        out.append(f"scopes    granted: {', '.join(self.granted_scopes) or '-'}")
-        out.append(f"          wanted:  {', '.join(self.wanted_scopes) or '-'}")
+        out.append(f"scopes    granted: {', '.join(short_scope(s) for s in self.granted_scopes) or '-'}")
+        out.append(f"          wanted:  {', '.join(short_scope(s) for s in self.wanted_scopes) or '-'}")
         for gap in self.missing_scopes:
             out.append(f"          {gap.line()}")
         if self.unused_scopes:
-            out.append(f"          unused: {', '.join(self.unused_scopes)}")
+            out.append(f"          unused: {', '.join(short_scope(s) for s in self.unused_scopes)}")
         out.append(f"datasets  {self.since or '-'} .. {self.until or '-'}")
+        # Sized to the scopes actually in this report: the v4 names are long enough that
+        # a fixed column either runs them into the next field or wastes half a terminal.
+        scope_width = max((len(short_scope(item.scope)) for item in self.datasets), default=12) + 1
         for item in self.datasets:
             out.append(
                 f"  [{item.status}]".ljust(16)
-                + f"{item.dataset:<15}{item.scope:<16}{item.reason}"
+                + f"{item.dataset:<15}{short_scope(item.scope):<{scope_width}}{item.reason}"
             )
         out.append(f"rate limit {_rate_limit_line(self.rate_limit)}")
         out.append(f"requests  {self.requests}")
@@ -380,10 +381,10 @@ def run_probe(
     budget = _Budget(max_requests)
     try:
         profile, profile_error = _read_profile(client, budget=budget)
+        identity = _read_identity(client, budget=budget)
         user = _user_view(profile)
-        resources = tuple(str(item) for item in (user.get("resources") or ()))
         until_day = until or clock().date()
-        member_since = _as_date(user.get("memberSinceDate"))
+        member_since = _as_date(user.get("membershipStartDate") or user.get("memberSinceDate"))
         since_day = since or member_since or (until_day - timedelta(days=_DEFAULT_BACKFALL_DAYS - 1))
         if since_day > until_day:
             since_day = until_day
@@ -397,7 +398,6 @@ def run_probe(
                     client,
                     dataset,
                     granted=granted,
-                    resources=resources,
                     since=since_day,
                     until=until_day,
                     history=history,
@@ -409,8 +409,10 @@ def run_probe(
         notes: list[str] = []
         if profile_error:
             notes.append(
-                "profile probe failed, so account resources could not be checked: " + profile_error
+                "profile probe failed, so the account's membership date could not be read: " + profile_error
             )
+        if not identity:
+            notes.append("users/me/identity answered nothing, so no user id is reported")
         if not history:
             notes.append("--no-history: the earliest date is the newest day asked, not a bound on the data")
         if budget.limit is not None and not budget.can(1):
@@ -424,13 +426,7 @@ def run_probe(
             requested_scopes=requested,
             missing_scopes=_missing_scopes(granted, requested, names),
             unused_scopes=tuple(sorted(set(granted) - set(ALL_SCOPES))),
-            account={
-                "user_id": str(user.get("encodedId") or client.tokens.user_id or "-"),
-                "display_name": str(user.get("displayName") or "") or None,
-                "member_since": member_since.isoformat() if member_since else None,
-                "time_zone": str(user.get("timeZone") or "") or None,
-                "resources": list(resources),
-            },
+            account=_account_view(identity, user, member_since),
             datasets=tuple(probes),
             rate_limit=_rate_limit(client, recorder, clock()),
             requests=budget.used,
@@ -461,26 +457,69 @@ def _resolve(datasets: Sequence[str] | None) -> tuple[str, ...]:
 
 
 def _read_profile(client: FitbitClient, *, budget: _Budget) -> tuple[dict[str, Any], str | None]:
-    """``profile.json`` as a dict, plus the reason it was not a usable one."""
+    """``users/me/profile`` as a dict, plus the reason it was not a usable one.
+
+    A failure here is reported, not fatal: the profile needs ``profile.readonly``, which a
+    user may have declined, and every question the probe asks about *data* is answered by
+    the dataset endpoints instead.
+    """
     budget.spend()
     try:
         payload = client.profile()
     except FitbitAPIError as exc:
         return {}, str(exc)
     if not payload:
-        # Empty is what :meth:`FitbitClient.profile` hands back for a body that was not
+        # Empty is what :meth:`HealthClient.profile` hands back for a body that was not
         # an object - a 200 that told us nothing is still worth saying out loud.
-        return {}, "profile.json answered with an empty or unrecognisable payload"
+        return {}, "users/me/profile answered with an empty or unrecognisable payload"
     return payload, None
 
 
+def _read_identity(client: FitbitClient, *, budget: _Budget) -> dict[str, Any]:
+    """``users/me/identity``, or ``{}``. Any health scope answers this one.
+
+    Worth the request on its own: it is the only place the numeric ``healthUserId`` and
+    the Fitbit-era ``legacyUserId`` appear, which is how a ``client_user_mismatch`` on a
+    Personal-mode project becomes a message instead of a mystery.
+    """
+    if not budget.can():
+        return {}
+    budget.spend()
+    try:
+        return client.identity()
+    except FitbitAPIError:
+        return {}
+
+
+def _account_view(identity: Mapping[str, Any], user: Mapping[str, Any], member_since: date | None) -> dict[str, Any]:
+    """Who this token belongs to, as a diagnostic reports it.
+
+    Ids, the membership date and the time zone: the three things that explain a window.
+    Deliberately not the rest of the profile, which also carries age, date of birth,
+    height and weight - a diagnostic gets printed on a screen in someone else's office.
+    """
+    return {
+        "health_user_id": str(identity.get("healthUserId") or "") or None,
+        "legacy_user_id": str(identity.get("legacyUserId") or "") or None,
+        "member_since": member_since.isoformat() if member_since else None,
+        "display_name": user.get("displayName") or None,
+        "time_zone": user.get("timeZone") or None,
+    }
+
+
 def _user_view(profile: dict[str, Any]) -> dict[str, Any]:
-    """The part of ``profile.json`` that describes the account (older shape: nested)."""
+    """The part of the profile that describes the account (older shape: nested)."""
     inner = profile.get("user")
     return inner if isinstance(inner, dict) else profile
 
 
 def _as_date(value: Any) -> date | None:
+    """An ISO string *or* a ``google.type.Date`` - v4 uses the latter."""
+    if isinstance(value, Mapping):
+        try:
+            return date(int(value["year"]), int(value["month"]), int(value["day"]))
+        except (KeyError, TypeError, ValueError):
+            return None
     text = str(value or "")[:10]
     try:
         return date.fromisoformat(text)
@@ -496,9 +535,9 @@ def _missing_scopes(granted: Iterable[str], requested: Iterable[str], names: Seq
     for scope in ALL_SCOPES:
         if scope in have:
             continue
-        # ``profile`` disables no dataset of its own; it is the identity-and-resources
-        # probe, and its absence is reported as a profile_error instead.
-        disabled = tuple(name for name in names if CATALOG[name].scope == scope)
+        # ``profile.readonly`` disables no dataset of its own; it is the identity probe,
+        # and its absence is reported as a profile_error instead.
+        disabled = tuple(name for name in names if scope in CATALOG[name].scopes)
         gaps.append(ScopeGap(scope=scope, datasets=disabled, requested=scope in asked))
     return tuple(gaps)
 
@@ -508,7 +547,6 @@ def _probe_dataset(
     dataset: Dataset,
     *,
     granted: tuple[str, ...],
-    resources: tuple[str, ...],
     since: date,
     until: date,
     history: bool,
@@ -516,13 +554,16 @@ def _probe_dataset(
     timezone: str,
     floor: str = "",
 ) -> DatasetProbe:
-    probe = DatasetProbe(dataset=dataset.name, scope=dataset.scope, resource=dataset.resource)
-    if granted and dataset.scope not in granted:
+    probe = DatasetProbe(dataset=dataset.name, scope=dataset.scope)
+    missing = [scope for scope in dataset.scopes if scope not in granted]
+    if granted and missing:
+        # The row names the scope the refusal is *about*, not the dataset's first scope:
+        # daily_summary needs two, and showing the one that was granted next to "token has
+        # no ..." reads like a contradiction.
+        probe.scope = missing[0]
         probe.status = NO_SCOPE
-        probe.message = f"token has no {dataset.scope!r} scope; not asked for"
+        probe.message = f"token has no {short_scope(missing[0])!r} scope; not asked for"
         return probe
-    if resources and dataset.resource is not None:
-        probe.resource_listed = dataset.resource in resources
     if not budget.can():
         probe.status = NO_BUDGET
         probe.message = "request budget spent before this dataset was asked"
@@ -562,7 +603,7 @@ def _probe_dataset(
     if not observed:
         probe.status = failure.status if failure else UNKNOWN
         probe.http_status = probe.http_status or (failure.http_status if failure else None)
-        probe.message = _note_resource((failure.message if failure and failure.message else probe.status), probe)
+        probe.message = failure.message if failure and failure.message else probe.status
         probe.history = HISTORY_NONE if history else HISTORY_NOT_SEARCHED
         if cut_short == NO_BUDGET:
             probe.status = NO_BUDGET
@@ -592,21 +633,8 @@ def _probe_dataset(
             f"data {probe.earliest} .. {probe.latest}; sampled back to {since} ({probe.floor}), "
             "every sampled day had data"
         )
-    probe.message = _note_resource(detail, probe)
+    probe.message = detail
     return probe
-
-
-def _note_resource(message: str, probe: DatasetProbe) -> str:
-    """Say so when the account's ``resources`` do not mention this dataset's resource.
-
-    Reported, never assumed: ``profile.resources`` is the account's own claim about what
-    it has, and the vocabulary of that list is not something this program controls. The
-    endpoint's own answer is better evidence, so it is what decides the status - the
-    mismatch goes next to it.
-    """
-    if probe.resource_listed is False:
-        return f"{message} (profile.resources does not list {probe.resource!r})"
-    return message
 
 
 def _systemic(status: str) -> bool:
@@ -619,7 +647,7 @@ def _floor_source(since: date | None, since_day: date, member_since: date | None
     if since is not None:
         return f"--since {since.isoformat()}"
     if member_since is not None:
-        return f"memberSinceDate {member_since.isoformat()}"
+        return f"membershipStartDate {member_since.isoformat()}"
     return f"{_DEFAULT_BACKFALL_DAYS}d default window (--since to widen it)"
 
 
@@ -658,7 +686,7 @@ def _ask(
         path = request.path()
         budget.spend()
         try:
-            response = client.get(path)
+            response = perform(client, request)
         except HTTPError as exc:
             statuses.append(classify_status(exc.status))
             http_status = exc.status
@@ -712,7 +740,14 @@ def _json_dict(response: Any) -> dict[str, Any] | None:
 
 
 def _rate_limit(client: FitbitClient, recorder: _HeaderRecorder, now: datetime) -> dict[str, Any]:
-    """What the API said about its rate limit, parsed and verbatim."""
+    """What the API said about its rate limit, parsed and verbatim.
+
+    For ``v4`` the honest answer is usually "nothing": the API publishes a per-minute
+    quota but no ``X-RateLimit-*`` headers, so what the client *did* to keep inside it -
+    the local ceiling in ``[api] requests_per_second`` - is reported next to what it was
+    told. A diagnostic that only prints the headers would print four blanks and leave the
+    user to conclude that nothing is limiting the import.
+    """
     reading = client.rate_limit
     out: dict[str, Any] = {
         "limit": reading.limit,
@@ -721,6 +756,8 @@ def _rate_limit(client: FitbitClient, recorder: _HeaderRecorder, now: datetime) 
         "reset_in_seconds": None if reading.reset_in is None else round(reading.reset_in, 1),
         "reset_at": None,
         "observed_headers": dict(recorder.headers),
+        "local_requests_per_second": getattr(client.api, "requests_per_second", None),
+        "local_waits": getattr(client.bucket, "waits", 0),
     }
     if reading.reset_in is not None:
         out["reset_at"] = (now + timedelta(seconds=float(reading.reset_in))).isoformat(timespec="seconds")
@@ -732,7 +769,9 @@ def _rate_limit_line(rate_limit: Mapping[str, Any]) -> str:
     remaining = rate_limit.get("remaining")
     interval = rate_limit.get("interval")
     if limit is None and remaining is None:
-        return "none observed (the API sent no X-RateLimit-* headers)"
+        local = rate_limit.get("local_requests_per_second")
+        local_text = "" if local in (None, float("inf")) else f"; this client holds itself to {local:g} requests/second"
+        return f"no ceiling sent by the API (v4 sends no X-RateLimit-* headers){local_text}"
     left = f"{remaining} of {limit}" if limit is not None and remaining is not None else str(remaining or limit)
     text = f"{left} requests left"
     if interval:

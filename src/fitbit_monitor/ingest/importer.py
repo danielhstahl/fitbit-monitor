@@ -28,9 +28,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from ..api.catalog import CATALOG, Payload, Request, daterange, lookup, permitted_datasets
+from ..api.catalog import CATALOG, Payload, Request, daterange, lookup, permitted_datasets, perform
 from ..api.client import FitbitClient
 from ..api.errors import (
     APIUnavailableError,
@@ -408,13 +408,27 @@ class ImportPlanner:
         return plan
 
     def _history_start(self, stop_day: date, notes: list[str]) -> date:
-        raw = str(self.profile.get("user", {}).get("memberSinceDate") or "")
-        if len(raw) >= 10:
+        """Where ``--full-history`` begins: the account's own membership date.
+
+        v4 publishes it as ``membershipStartDate``, a ``google.type.Date`` rather than a
+        string, and the legacy shape is still accepted because fixtures and stored
+        profiles from before the port are on disk. Neither the API nor this tool
+        invents an earlier start: a dataset that begins before the account did is a
+        question for the account, not for a default.
+        """
+        raw = self.profile.get("membershipStartDate")
+        if isinstance(raw, Mapping):
             try:
-                return date.fromisoformat(raw[:10])
+                return date(int(raw["year"]), int(raw["month"]), int(raw["day"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+        legacy = str(self.profile.get("user", {}).get("memberSinceDate") or "")
+        if len(legacy) >= 10:
+            try:
+                return date.fromisoformat(legacy[:10])
             except ValueError:
                 pass
-        notes.append("no memberSinceDate in the profile; backfilling 365 days instead of the whole history")
+        notes.append("no membershipStartDate in the profile; backfilling 365 days instead of the whole history")
         return stop_day - timedelta(days=364)
 
 
@@ -599,42 +613,65 @@ class Importer:
     def _fetch_chunk(
         self, dataset, chunk: ChunkPlan, result: DatasetReport
     ) -> tuple[IngestStats, datetime | None]:
-        """Fetch every request in a chunk, store it, and commit. All or nothing."""
+        """Fetch every request in a chunk, store it, and commit. All or nothing.
+
+        One request is not always one response: v4 answers a window with a page and a
+        ``nextPageToken``, and a chunk that silently stored page one would look exactly
+        like a chunk that had nothing else in it. So pages are followed here, each one
+        stored as its own raw payload under the same window, and the watermark only
+        advances once the last page has landed.
+        """
         stats = IngestStats()
         payloads: list[Payload] = []
         for request in chunk.requests:
             path = request.path()
-            try:
-                response = self.client.get(path)
-            except HTTPError as exc:
-                if exc.status in EMPTY_STATUSES:
-                    result.info.append(f"{path}: no data (HTTP {exc.status})")
-                    continue
-                raise _ChunkFailed(f"{path}: {exc}")
-            parsed = _parse_json(response)
-            asked = max(request.covers) if request.covers else request.day
-            if parsed is None:
+            cursor: Request | None = request
+            seen_tokens: set[str] = set()
+            while cursor is not None:
+                try:
+                    response = self._perform(cursor)
+                except HTTPError as exc:
+                    if exc.status in EMPTY_STATUSES:
+                        result.info.append(f"{path}: no data (HTTP {exc.status})")
+                        break
+                    if exc.missing_scope:
+                        # Partial consent: one data type the token cannot see is a
+                        # reported gap, not a failed import. Google's own rule for
+                        # withheld scopes is "keep the application functional".
+                        result.info.append(f"{path}: refused - {exc.reason} (scope not granted)")
+                        break
+                    raise _ChunkFailed(f"{path}: {exc}")
+                parsed = _parse_json(response)
+                asked = max(cursor.covers) if cursor.covers else cursor.day
+                if parsed is None:
+                    stats += self.ingest.payload(
+                        dataset.name,
+                        path,
+                        response.text,
+                        rows=None,
+                        requested_start=cursor.day,
+                        requested_end=asked,
+                        commit=False,
+                    )
+                    result.notes.append(f"{path}: payload was not JSON (quarantined)")
+                    break
                 stats += self.ingest.payload(
                     dataset.name,
                     path,
                     response.text,
-                    rows=None,
-                    requested_start=request.day,
+                    rows=[],
+                    requested_start=cursor.day,
                     requested_end=asked,
                     commit=False,
                 )
-                result.notes.append(f"{path}: payload was not JSON (quarantined)")
-                continue
-            stats += self.ingest.payload(
-                dataset.name,
-                path,
-                response.text,
-                rows=[],
-                requested_start=request.day,
-                requested_end=asked,
-                commit=False,
-            )
-            payloads.append(Payload(day=request.day, body=parsed))
+                if isinstance(parsed, dict):
+                    payloads.append(Payload(day=cursor.day, body=parsed))
+                token = cursor.page_token(parsed) if isinstance(parsed, dict) else None
+                # A token we have already asked for is a loop, and a loop inside a chunk
+                # is an import that never ends and never says why.
+                cursor = cursor.next_page(token) if token and token not in seen_tokens else None
+                if token:
+                    seen_tokens.add(token)
         last_ts: datetime | None = None
         if payloads:
             rows = self._normalize(dataset, payloads, chunk)
@@ -643,6 +680,14 @@ class Importer:
             last_ts = max(stamps) if stamps else None
         self.ingest.commit()
         return stats, last_ts
+
+    def _perform(self, request: Request):
+        """One request as the API wants it: a filtered GET, or a rollup POST.
+
+        The catalog decided the verb when it built the request; the importer only has to
+        not lose it. Both jobs now live in :func:`fitbit_monitor.api.catalog.perform`.
+        """
+        return perform(self.client, request)
 
     def _normalize(
         self, dataset, payloads: Sequence[Payload], chunk: ChunkPlan

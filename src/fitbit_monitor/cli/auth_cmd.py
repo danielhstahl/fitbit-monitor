@@ -18,7 +18,8 @@ import sys
 from datetime import timedelta
 
 from ..api.auth import LoopbackCallback, PkceFlow, exchange_code, fetch_redirect_manually, open_browser
-from ..api.catalog import ALL_SCOPES
+from ..api.catalog import ALL_SCOPES, short_scope
+from ..api.auth import TokenSet
 from ..api.errors import CredentialsExpiredError
 from ..api.source import LEGACY_SUNSET, TOKEN_PLANE_SETTINGS, guard as guard_endpoints, state_of
 from ..errors import UsageError
@@ -89,7 +90,7 @@ def cmd_auth_login(args: argparse.Namespace, session: Session) -> int:
         print_json({"status": "ok", "credentials": str(path), **tokens.public()})
         return EXIT_OK
     print(f"2. stored tokens in {path} (mode 0600)")
-    print(f"   user {tokens.user_id}, scopes: {', '.join(tokens.scopes) or 'none reported'}")
+    print(f"   user {tokens.user_id}, scopes: {_scopes(tokens)}")
     print(f"   access token valid until {tokens.expires_at.isoformat(timespec='seconds')}")
     print("\nnext: fm import --dry-run")
     return EXIT_OK
@@ -176,7 +177,7 @@ def cmd_auth_status(args: argparse.Namespace, session: Session) -> int:
         print_json(payload)
         return EXIT_OK
     print(f"authenticated as {tokens.user_id} (credentials: {store.path})")
-    print(f"  scopes:  {', '.join(tokens.scopes) or '-'}")
+    print(f"  scopes:  {_scopes(tokens)}")
     print(f"  expires: {tokens.expires_at.isoformat(timespec='seconds')} ({_human(tokens.seconds_left())} left)")
     if note:
         print(f"  {note}")
@@ -196,6 +197,16 @@ def cmd_auth_logout(args: argparse.Namespace, session: Session) -> int:
         return EXIT_OK
     print(f"removed {store.path}" if removed else f"nothing to remove at {store.path}")
     return EXIT_OK
+
+
+def _scopes(tokens: TokenSet) -> str:
+    """Granted scopes as short names.
+
+    The v4 scope URLs are ~70 characters apiece and differ only in the middle word, so
+    the human line prints what differs; ``auth status --json`` still carries the URLs
+    verbatim.
+    """
+    return ", ".join(short_scope(scope) for scope in tokens.scopes) or "none reported"
 
 
 def _human(seconds: float) -> str:

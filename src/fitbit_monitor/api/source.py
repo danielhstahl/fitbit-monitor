@@ -1,16 +1,17 @@
 """Which upstream source this build dials - and whether that host still answers.
 
-ADR-0002 decided the source: the **Google Health API**, ``https://health.googleapis.com/v4``.
-The client in this package still speaks the **legacy Fitbit Web API** dialect, and that
-source is gone: Google turned ``api.fitbit.com`` and the Fitbit OAuth endpoints off on
-**2026-11-02** (ADR-0002 §1-§2).
+ADR-0002 decided the source: the **Google Health API**, ``https://health.googleapis.com/v4``,
+because the **legacy Fitbit Web API** is gone - Google turned ``api.fitbit.com`` and the
+Fitbit OAuth endpoints off on **2026-11-02** (ADR-0002 §1-§2). The defaults in
+:mod:`fitbit_monitor.config` are that decision, so a fresh install dials the live source.
 
-A dead API is the one failure an import tool must never report as an authentication
-problem, because from a terminal the two look identical - a ``401`` - and the advice they
-need is opposite. One means *go and log in again*; the other means *this endpoint will
-never issue a token again, whatever you do*. Before this module existed, ``fm import``
-answered the second case with the first message, on every dataset, and exited 1. Measured
-from this repository on 2026-11-23 with no credentials at all:
+What this module is still for is the config that outlived the service: a ``[api]`` table
+pinned at ``api.fitbit.com``, a token endpoint copy-pasted from a 2025 blog post. And a
+dead API is the one failure an import tool must never report as an authentication problem,
+because from a terminal the two look identical - a ``401`` - and the advice they need is
+opposite. One means *go and log in again*; the other means *this endpoint will never issue
+a token again, whatever you do*. Measured from this repository on 2026-11-23 with no
+credentials at all:
 
 ===================================================  =========  ==========================
 request                                              status     signal in the body

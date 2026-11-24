@@ -101,7 +101,7 @@ def register(sub: "argparse._SubParsersAction") -> None:
     probe.add_argument(
         "--since",
         default=None,
-        help="oldest day to look for data (default: the account's memberSinceDate)",
+        help="oldest day to look for data (default: the account's membership date)",
     )
     probe.add_argument("--until", default=None, help="newest day to look for data (default: today)")
     probe.add_argument(
