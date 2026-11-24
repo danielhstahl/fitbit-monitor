@@ -106,10 +106,11 @@ def _source_note(api, *, setting: str | None = None) -> str | None:
     """A warning line when an ``[api]`` endpoint belongs to the retired source, else nothing.
 
     Phrased as a note rather than a refusal because the token *machinery* is not broken -
-    PKCE, storage and refresh all work, and work against fixtures or any other host -
-    while the Fitbit endpoints named in the default config issue no tokens at all. Pass
-    ``setting`` to talk about one endpoint specifically (a login command cares about the
-    consent page it is about to show, and nothing else).
+    PKCE, storage and refresh all work, and work against fixtures or any other host. The
+    problem is a config that outlived the service it names: the shipped defaults are the
+    Google Health API, so this fires only when `[api]` was pinned back at the retired
+    Fitbit host. Pass ``setting`` to talk about one endpoint specifically (a login command
+    cares about the consent page it is about to show, and nothing else).
     """
     state = state_of(api) if setting is None else state_of(api, settings=(setting,))
     if not state.is_retired:
@@ -117,9 +118,9 @@ def _source_note(api, *, setting: str | None = None) -> str | None:
     names = ", ".join(f"[api] {name}" for name, _url in state.retired)
     return (
         f"note: {names} is the retired Fitbit Web API, switched off {LEGACY_SUNSET}: it still "
-        "answers, but it issues no tokens and no data, so nothing started here can finish "
-        "until the port in docs/adr/0002-health-api-source.md section 10 lands. `fm api source "
-        "--verify` shows what does still answer; `fm import --source csv` works today."
+        "answers, but it issues no tokens and no data, so nothing pointed at it can finish. "
+        "Remove those settings to get the defaults (`fm api source` shows both), or skip the "
+        "API entirely with `fm import --source csv`."
     )
 
 

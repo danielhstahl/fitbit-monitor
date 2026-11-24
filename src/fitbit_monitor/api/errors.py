@@ -54,9 +54,10 @@ class SourceRetiredError(FitbitAPIError):
             hint=hint
             or (
                 "there is no login that fixes this: the host issues no tokens any more. "
-                f"Import the Takeout archive instead - `fm import --source csv --path ARCHIVE` "
-                f"needs no API at all - and see {DECISION_DOC} section 10 for the port to "
-                f"{DECIDED_TARGET}; `fm api source --verify` shows what still answers."
+                f"Delete those [api] settings to get the defaults, which are {DECIDED_TARGET}. "
+                f"Or skip the API: `fm import --source csv --path ARCHIVE` needs no API at all. "
+                f"`fm api source --verify` shows what still answers; {DECISION_DOC} is the "
+                "decision and its section 10 the record of the port."
             ),
         )
 

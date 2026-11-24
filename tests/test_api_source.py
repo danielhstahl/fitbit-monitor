@@ -469,6 +469,14 @@ class RetiredSourceCliTest(CliTestCase):
         self.assertIn(source.LEGACY_SUNSET, text)
         self.assertIn("fm import --source csv", text)
         self.assertNotIn("dev.fitbit.com/apps", text, "the sunset registration page is not an instruction")
+        # The template used to open with "THE API PATH IS BLOCKED TODAY"; a config file is
+        # read months later, and by then the only true version of that sentence is about a
+        # config the user pinned at the dead host themselves.
+        self.assertNotIn("is blocked", text)
+        self.assertIn("health_metrics_and_measurements.readonly", text, "the scopes it will ask for")
+        _code, text = self.fm("config", "init", "--force", expect=EXIT_OK)
+        self.assertIn("fm auth login", text)
+        self.assertNotIn("when it lands", text, "the next steps are next steps")
 
     def test_doctor_reports_the_source_without_failing_the_run(self) -> None:
         """A warning, not a failure: a check that shouts at a config mistake the tool can
@@ -541,6 +549,11 @@ class RetiredSourceCliTest(CliTestCase):
         )
         code, text = self.fm("api", "source", expect=EXIT_OK)
         self.assertIn("Google Health API", text)
+        # The two consolation lines are for a config that points at nothing. Printed under
+        # a working source they read as a disclaimer about the thing that is working.
+        self.assertNotIn("decided instead", text)
+        self.assertNotIn("works today", text)
+        self.assertIn("decision", text, "where the decision is written down is always worth naming")
 
     def test_the_help_text_documents_the_new_command(self) -> None:
         _code, text = self.fm("api", "--help", expect=EXIT_OK)

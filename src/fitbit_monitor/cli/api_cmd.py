@@ -42,6 +42,7 @@ from ..api.source import (
     DECIDED_BASE_URL,
     DECIDED_NAME,
     DECISION_DOC,
+    STATE_DECIDED,
     UNREACHABLE,
     WORKING_TODAY,
     check_alive,
@@ -268,9 +269,14 @@ def cmd_api_source(args: argparse.Namespace, session: Session) -> int:
     for name, url in state.endpoints:
         mark = "   <- retired" if any(name == retired_name for retired_name, _url in state.retired) else ""
         print(f"  {name:<18} {url}{mark}")
-    print(f"  decided instead    {DECIDED_NAME}  {DECIDED_BASE_URL}")
+    # "decided instead" and "works today" are consolation prizes for a config that points
+    # at nothing; printing them when the source is the decided one reads as a disclaimer
+    # about a service that is working.
+    if state.state != STATE_DECIDED:
+        print(f"  decided instead    {DECIDED_NAME}  {DECIDED_BASE_URL}")
     print(f"  decision           {DECISION_DOC} (section 10 is the port)")
-    print(f"  works today        {WORKING_TODAY}")
+    if state.is_retired:
+        print(f"  works today        {WORKING_TODAY}")
     if args.verify:
         if offline_note:
             print(f"\nlive check          {offline_note}")

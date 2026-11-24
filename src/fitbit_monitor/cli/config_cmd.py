@@ -30,18 +30,25 @@ STARTER = """\
 [store]
 path = "{store}"
 
-# THE API PATH IS BLOCKED TODAY, AND THIS IS THE REASON (2026-11-23).
-# The decided source is the Google Health API (docs/adr/0002-health-api-source.md); the
-# client in this build still speaks the legacy Fitbit Web API dialect, which Google
-# switched off on 2026-11-02 - it answers 401 and returns no data. `fm api source` says
-# as much in one line. Everything below is what you will need when the port in that ADR's
-# section 10 lands: create a Google Cloud project in Personal mode, enable the Google
-# Health API, create an OAuth client, paste its credentials here. The redirect URI has to
-# be registered exactly as printed below - scheme, host, port and trailing slash included
-# (a loopback URI like this one is allowed for a local tool).
+# THE ONE PART YOU BRING YOURSELF: AN OAUTH CLIENT.
+# The source is the Google Health API (docs/adr/0002-health-api-source.md) and `fm`
+# speaks it - health.googleapis.com/v4, the four googlehealth.* readonly scopes below.
+# It is Personal mode, so there is no approval queue and no fee, and no client is shipped
+# in this repository either: a personal tool with an embedded client secret is a hosted
+# service pretending not to be one. To get a token:
+#   1. a Google Cloud project with the Google Health API enabled, in Personal mode
+#   2. an OAuth client of that project
+#   3. its id below, and this redirect URI registered exactly - scheme, host, port and
+#      trailing slash all have to match (a loopback URI is allowed for a local tool):
 #   {redirect}
+# A Testing-status client expires consent after seven days; `fm auth login` re-asks for
+# consent when it has to, and says so rather than looking like a bad password.
 #
-# None of it is needed for the source that works today:
+# The legacy Fitbit Web API was switched off on 2026-11-02. A base_url naming it is
+# refused with exit 6 rather than dialled, because it answers 401 and "log in again" is
+# advice with no exit. `fm api source` prints all of that in one line.
+#
+# And the other source needs no client, no consent and no network at all:
 #   fm import --source csv --path ~/Downloads/takeout.zip
 [api]
 client_id = ""
@@ -51,7 +58,8 @@ scopes = [{scopes}]
 
 # How an ad-hoc import behaves. Every key here has a default; they are listed so the
 # knobs are visible - see docs/data-import.md. `timezone` is the account timezone: the
-# API and the export CSVs both timestamp in it without saying so.
+# days and the civil times the API and the export CSVs report arrive without an offset,
+# and this is what says where they were spoken.
 [import]
 timezone = "UTC"
 recent_days = 7
@@ -126,12 +134,13 @@ def cmd_config_init(args: argparse.Namespace, session: Session) -> int:
         return EXIT_OK
     print(f"wrote {path} (mode 0600)")
     print("\nnext:")
-    print("  1. today, with no API and no credentials:")
+    print("  1. with no API, no client and no network - years of history, all at once:")
     print("       fm import --source csv --path ~/Downloads/takeout.zip")
-    print("  2. the API path is blocked until the port lands - `fm api source` says why, and")
-    print("     docs/adr/0002-health-api-source.md section 10 is the port")
-    print(f"  3. when it lands: register the OAuth client with redirect URI {session.config.api.redirect_uri},")
-    print(f"     paste its client id and secret into [api] in {path}, then `fm auth login`")
+    print("  2. for the API: register an OAuth client with redirect URI")
+    print(f"       {session.config.api.redirect_uri}")
+    print(f"     paste its id (and secret, if it has one) into [api] in {path}, then `fm auth login`")
+    print("  3. `fm api source` prints what this build dials, and refuses a config left on")
+    print("     the retired Fitbit host rather than dialling it")
     return EXIT_OK
 
 
