@@ -150,6 +150,14 @@ ME = "users/me"
 PAGE_MAX = 10_000
 #: ``sleep`` and ``exercise`` are capped at 25 per page, default and maximum both.
 SESSION_PAGE_MAX = 25
+#: ``dailyRollUp`` caps a page at 90 - not 10 000, and the cap is per data type: "For
+#: ``calories-in-heart-rate-zone``, ``heart-rate``, ``active-minutes``, and
+#: ``total-calories``, the default and maximum page size is ``14``" (``v4`` discovery,
+#: ``DailyRollUpDataPointsRequest.pageSize``). Both numbers are larger than any daily
+#: window this file builds, which is the point: a page size over the documented maximum
+#: is a request that relies on the server being lenient about it.
+DAILY_ROLLUP_PAGE_MAX = 90
+DAILY_ROLLUP_PAGE_MAX_SHORT = 14
 
 #: Rollup range caps, in days. Four data types get 14 days; every other one gets 90.
 ROLLUP_MAX_RANGE_DAYS = 90
@@ -364,7 +372,7 @@ def daily_rollup_requests(
     window_size_days: int = 1,
     window_days: int = DAILY_ROLLUP_WINDOW_DAYS,
     max_range_days: int = ROLLUP_MAX_RANGE_DAYS,
-    page_size: int = PAGE_MAX,
+    page_size: int = DAILY_ROLLUP_PAGE_MAX,
 ) -> Callable[[date, date], Sequence[Request]]:
     """``POST …/dataPoints:dailyRollUp`` per civil-time window.
 
@@ -402,29 +410,35 @@ def list_requests(
     filter_field: str,
     *,
     page_size: int = PAGE_MAX,
-    time_of_day: bool = False,
 ) -> Callable[[date, date], Sequence[Request]]:
-    """``GET …/dataPoints`` with a ``filter`` on one time field.
+    """``GET …/dataPoints`` with an AIP-160 ``filter`` on one time field.
 
     For a *daily* data type this is the whole story: the points are already one per
     day, so aggregating them again would only lose information.
 
-    Two wire details are easy to get wrong and are the reason this is a function and
-    not an f-string in a dataset definition: the data type is snake_case in the filter
-    while kebab-case in the path (hyphens here are an ``INVALID_DATA_POINT_FILTER``),
-    and only ``>=`` and ``<=`` exist as comparators, so the upper bound of a civil day
-    is ``T23:59:59`` rather than the next morning.
+    Two wire details are easy to get wrong and are the reason this is a function and not
+    an f-string in a dataset definition:
+
+    * the data type is snake_case in the filter while kebab-case in the path (hyphens
+      here are an ``INVALID_DATA_POINT_FILTER``);
+    * **the only comparators that exist are** ``>=`` **and** ``<``. There is no ``<=``,
+      and the API checks it per data type: "Supported comparison operators: ``>=``,
+      ``<``" (``GET /v4/{parent}/dataPoints``, ``filter``, from the published ``v4``
+      discovery document). A filter with a ``<=`` comes back ``400 INVALID_ARGUMENT /
+      INVALID_DATA_POINT_FILTER_RESTRICTION_COMPARATOR``.
+
+    So a window is half-open in the same direction everywhere else in this file: the upper
+    bound is the exclusive start of the day *after* the last day covered. A civil date
+    with no clock time already means midnight, so there is no ``T23:59:59`` to get wrong -
+    and no last second of a day quietly outside the window.
     """
     span = ROLLUP_MAX_RANGE_DAYS  # a list has no range cap of its own; keep chunks uniform
 
     def build(start: date, stop: date) -> Sequence[Request]:
         out: list[Request] = []
         for first, last in _windows(start, stop, span):
-            if time_of_day:
-                low, high = f'{first.isoformat()}T00:00:00', f"{last.isoformat()}T23:59:59"
-            else:
-                low, high = first.isoformat(), last.isoformat()
-            expression = f'{filter_field} >= "{low}" AND {filter_field} <= "{high}"'
+            high = (last + timedelta(days=1)).isoformat()
+            expression = f'{filter_field} >= "{first.isoformat()}" AND {filter_field} < "{high}"'
             out.append(
                 Request(
                     template=f"{ME}/dataTypes/{data_type}/dataPoints",
@@ -454,10 +468,16 @@ def daily_summary_requests(start: date, stop: date) -> Sequence[Request]:
     for builder in (
         daily_rollup_requests("steps", window_days=DAILY_ROLLUP_WINDOW_DAYS),
         daily_rollup_requests(
-            "active-minutes", window_days=DAILY_ROLLUP_WINDOW_DAYS, max_range_days=ROLLUP_MAX_RANGE_DAYS_SHORT
+            "active-minutes",
+            window_days=DAILY_ROLLUP_WINDOW_DAYS,
+            max_range_days=ROLLUP_MAX_RANGE_DAYS_SHORT,
+            page_size=DAILY_ROLLUP_PAGE_MAX_SHORT,
         ),
         daily_rollup_requests(
-            "total-calories", window_days=DAILY_ROLLUP_WINDOW_DAYS, max_range_days=ROLLUP_MAX_RANGE_DAYS_SHORT
+            "total-calories",
+            window_days=DAILY_ROLLUP_WINDOW_DAYS,
+            max_range_days=ROLLUP_MAX_RANGE_DAYS_SHORT,
+            page_size=DAILY_ROLLUP_PAGE_MAX_SHORT,
         ),
         daily_rollup_requests("floors", window_days=DAILY_ROLLUP_WINDOW_DAYS),
     ):
@@ -786,10 +806,10 @@ CATALOG: dict[str, Dataset] = {
         normalize=normalize_sleep,
         # Keyed on civil *end* time: a night belongs to the day it woke up in, and
         # that is the only way a chunk boundary does not split a session in half. The
-        # bounds carry a clock time because a bare civil date means midnight, and
-        # "midnight <= session end <= midnight" would match exactly nothing.
+        # window is whole days and half-open - a civil date means midnight, so
+        # ``>= 2026-05-01 AND < 2026-05-08`` is exactly the seven nights.
         requests_in_chunk=list_requests(
-            "sleep", "sleep.interval.civil_end_time", page_size=SESSION_PAGE_MAX, time_of_day=True
+            "sleep", "sleep.interval.civil_end_time", page_size=SESSION_PAGE_MAX
         ),
     ),
     "hrv": Dataset(

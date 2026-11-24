@@ -15,6 +15,7 @@ because rolling one up answers a different question entirely.
 
 from __future__ import annotations
 
+import re
 import unittest
 from datetime import UTC, date, datetime, timedelta
 
@@ -22,6 +23,8 @@ from fitbit_monitor.api.catalog import (
     ACTIVITY_SCOPE,
     ALL_SCOPES,
     CATALOG,
+    DAILY_ROLLUP_PAGE_MAX,
+    DAILY_ROLLUP_PAGE_MAX_SHORT,
     HEALTH_METRICS_SCOPE,
     PAGE_MAX,
     SESSION_PAGE_MAX,
@@ -164,10 +167,61 @@ class DatasetDefinitionTest(unittest.TestCase):
         self.assertEqual(request.path(), "/users/me/dataTypes/sleep/dataPoints")
         params = request.params()
         self.assertEqual(params["pageSize"], str(SESSION_PAGE_MAX))
-        self.assertIn("sleep.interval.civil_end_time >=", params["filter"])
-        # A bare civil date means midnight, so an inclusive upper bound has to carry a
-        # clock time or the whole last day is silently outside the window.
-        self.assertIn('2026-05-07T23:59:59"', params["filter"])
+        # Half-open, and a bare civil date is already midnight: seven nights, no clock
+        # time to get wrong and no last second of the final day outside the window.
+        self.assertEqual(
+            params["filter"],
+            'sleep.interval.civil_end_time >= "2026-05-01" AND sleep.interval.civil_end_time < "2026-05-08"',
+        )
+
+    def test_a_daily_list_filter_ends_the_day_after_the_last_one_covered(self):
+        (request,) = CATALOG["hrv"].requests_in_chunk(START, STOP)
+        self.assertEqual(
+            request.params()["filter"],
+            'daily_heart_rate_variability.date >= "2026-05-01" AND daily_heart_rate_variability.date < "2026-05-08"',
+        )
+
+    def test_no_filter_uses_a_comparator_the_grammar_does_not_have(self):
+        """v4 has two comparators, ``>=`` and ``<``, and no ``<=``.
+
+        "Supported comparison operators: ``>=``, ``<``" - the ``filter`` parameter of
+        ``GET /v4/{parent}/dataPoints`` in the published discovery document. The service
+        checks this per data type, so one wrong comparator does not break the import: it
+        turns one dataset into ``400 INVALID_ARGUMENT /
+        INVALID_DATA_POINT_FILTER_RESTRICTION_COMPARATOR``, which lands as a warning line
+        under an otherwise successful run. Sweeping every dataset's every request is what
+        stops one definition being quietly wrong.
+        """
+        comparators = re.compile(r"(<=|>=|<|>)")
+        for name, dataset in sorted(CATALOG.items()):
+            for request in dataset.requests_in_chunk(START, STOP):
+                with self.subTest(dataset=name, path=request.path()):
+                    for found in comparators.findall(request.params().get("filter", "")):
+                        self.assertIn(found, (">=", "<"), f"{name} sent {found!r}, which v4 refuses")
+
+    def test_a_daily_rollup_asks_for_a_page_size_the_data_type_allows(self):
+        """The page cap is per verb *and* per data type: 90, or 14 for four of them.
+
+        Asking for 10 000 when the documented maximum is 90 works only while the server is
+        lenient about it, and "lenient" is not something to bank on; 14 daily points is
+        also exactly the largest short-range window this file builds.
+        """
+        sizes = {}
+        for request in CATALOG["daily_summary"].requests_in_chunk(START, STOP):
+            sizes[request.path().split("/dataTypes/")[1].split("/")[0]] = (request.json_body() or {}).get("pageSize")
+        self.assertEqual(sizes["steps"], DAILY_ROLLUP_PAGE_MAX)
+        self.assertEqual(sizes["floors"], DAILY_ROLLUP_PAGE_MAX)
+        self.assertEqual(sizes["active-minutes"], DAILY_ROLLUP_PAGE_MAX_SHORT)
+        self.assertEqual(sizes["total-calories"], DAILY_ROLLUP_PAGE_MAX_SHORT)
+        # ... and the window field is the one *this* verb has: `dailyRollUp` takes
+        # `windowSizeDays`, `rollUp` takes `windowSize`. An unknown field in a POST body is
+        # another 400 waiting to happen.
+        for request in CATALOG["daily_summary"].requests_in_chunk(START, STOP):
+            body = request.json_body()
+            if body is None:
+                continue  # the resting-HR half of this dataset is a `list`, not a rollup
+            self.assertEqual(body.get("windowSizeDays"), 1)
+            self.assertNotIn("windowSize", body)
 
     def test_daily_types_are_listed_with_a_snake_case_filter_field(self):
         for name, field in (

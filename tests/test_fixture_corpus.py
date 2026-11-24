@@ -121,5 +121,55 @@ class CorpusCoversTheCatalogTest(unittest.TestCase):
             self.assertEqual(rebuilt, key)
 
 
+class StandInSpeaksTheFilterGrammarTest(unittest.TestCase):
+    """The generator is only evidence while it refuses what the service refuses.
+
+    v4's ``filter`` has two comparators, ``>=`` and ``<`` - "Supported comparison
+    operators: ``>=``, ``<``", from the ``dataPoints`` list method of the published
+    discovery document - and answers anything else with ``400 INVALID_ARGUMENT: Invalid
+    data point filter: INVALID_DATA_POINT_FILTER_RESTRICTION_COMPARATOR``. The retired
+    Fitbit grammar accepted ``<=``, so this is precisely the mistake a port makes quietly:
+    one dataset warns, everything else imports, and the missing rows are invisible unless
+    someone counts them.
+    """
+
+    TYPE = "daily-heart-rate-variability"
+    FIELD = "daily_heart_rate_variability.date"
+
+    def setUp(self) -> None:
+        self.api = generator().SyntheticApi(start=SINCE, stop=UNTIL)
+
+    def ask(self, expression: str) -> tuple[int, dict]:
+        return self.api.respond(
+            "GET",
+            f"/users/me/dataTypes/{self.TYPE}/dataPoints",
+            {"filter": expression, "pageSize": "10000"},
+            {},
+        )
+
+    def days(self, payload: dict) -> list[int]:
+        """The days answered, out of the camelCase attribute the response uses."""
+        return sorted(point["dailyHeartRateVariability"]["date"]["day"] for point in payload["dataPoints"])
+
+    def test_an_inclusive_upper_bound_is_refused_the_way_the_service_refuses_it(self) -> None:
+        status, payload = self.ask(f'{self.FIELD} >= "2026-05-01" AND {self.FIELD} <= "2026-05-14"')
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["status"], "INVALID_ARGUMENT")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Invalid data point filter: INVALID_DATA_POINT_FILTER_RESTRICTION_COMPARATOR",
+        )
+
+    def test_the_exclusive_bound_answers_the_days_before_it_and_not_the_day_it_names(self) -> None:
+        status, payload = self.ask(f'{self.FIELD} >= "2026-05-01" AND {self.FIELD} < "2026-05-08"')
+        self.assertEqual(status, 200)
+        self.assertEqual(self.days(payload), [1, 2, 3, 4, 5, 6, 7])
+
+    def test_a_single_day_window_is_one_day(self) -> None:
+        status, payload = self.ask(f'{self.FIELD} >= "2026-05-06" AND {self.FIELD} < "2026-05-07"')
+        self.assertEqual(status, 200)
+        self.assertEqual(self.days(payload), [6])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

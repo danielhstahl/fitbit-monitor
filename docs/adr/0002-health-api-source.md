@@ -295,6 +295,45 @@ Other decisions forced by this section:
   with jitter** - the documented trio. `client.py` already retries 429/5xx with backoff;
   it gains a local bucket and loses its dependency on rate-limit headers.
 
+**Amendment, 2026-11-24: the filter grammar, read out of the discovery document.** The
+first real import against the live service answered one dataset with
+
+```text
+HTTP 400 INVALID_ARGUMENT: Invalid data point filter:
+INVALID_DATA_POINT_FILTER_RESTRICTION_COMPARATOR
+```
+
+and every other dataset with success, which is exactly how a missing dataset becomes a
+warning line nobody re-reads. The fix was in the request. `GET /v4/{parent}/dataPoints`
+documents `filter` as "Filter expression following https://google.aip.dev/160", and for
+each supported field - interval start, civil start, sample time, `{daily_type}.date`, the
+session times - the line reads "Supported comparison operators: `>=`, `<`". **There is no
+`<=`.** A closed upper bound is therefore the exclusive start of the next day:
+`daily_heart_rate_variability.date >= "2026-05-01" AND …date < "2026-05-15"` is the
+fortnight, and since a civil date already means midnight there is no `T23:59:59` left to
+get wrong. That is the same half-open convention this section already required of `rollUp`
+(`range`) and `dailyRollUp` (`CivilTimeInterval`); the legacy filter grammar's `<=` was the
+exception.
+
+Two more caps from the same document, since a cap is a limit on the request: `dailyRollUp`
+answers at most **90** points a page, and 14 for `heart-rate`, `active-minutes`,
+`total-calories` and `calories-in-heart-rate-zone`, while `rollUp` keeps the 1 440 default
+and 10 000 maximum above. The catalog now asks for the documented maximum of the verb and
+data type it is using rather than 10 000 everywhere, and note that the window field differs
+too: `dailyRollUp` takes `windowSizeDays` with a `{start, end}` civil interval, `rollUp`
+takes `windowSize` with a `google.type.Interval` of `{startTime, endTime}` - an unknown
+field in either body is another 400 in the same place.
+
+This is checked rather than remembered. `SyntheticApi` in `scripts/dev/record_fixtures.py`
+parses a filter the way the grammar does and answers a `<=` with that status and message
+verbatim, so the replay corpus cannot contain a request the service would refuse, and
+`test_catalog.py` sweeps every dataset for a comparator outside `>=`/`<`. The document is
+credential-free and citable
+(`https://health.googleapis.com/$discovery/rest?version=v4`), and
+`tests/fixtures/api/_provenance.json` names it as the source of the *request* side while
+`"recorded_from": null` keeps saying that the responses are still generated rather than
+captured (§10 step 1).
+
 ### 7. The dataset map - the table Epic 2 and Epic 4 code from
 
 Internal dataset names do not change: `heart_rate`, `daily_summary`, `sleep`, `hrv`,
@@ -611,6 +650,10 @@ row above.
 Re-open this ADR when any of these is true - each is a dated, observable event, not a
 mood:
 
+* The published `v4` discovery document changes what `filter` supports, what a page may
+  hold, or what a request body field is called - it needs no credentials, so this check is
+  a curl rather than a favour. It is what §6's amendment caught on 2026-11-24, and
+  `fm api source --verify` is the same kind of check against the live hosts.
 * `health.googleapis.com` returns a non-4xx status without a token, or a documented
   quota number changes (§6).
 * A Google Health data type we depend on moves to `v4beta`, is deprecated, or is
