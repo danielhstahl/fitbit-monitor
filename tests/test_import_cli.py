@@ -168,6 +168,49 @@ class ImportCliTest(CliTestCase):
         self.assertIn("failed", text)
         self.assertIn("HTTP 403", text, "the reason is on the same line as the failure")
 
+    def test_a_refused_dataset_is_an_error_not_a_warning(self) -> None:
+        """``400 INVALID_ARGUMENT`` on one dataset is a failure with rows missing.
+
+        Observed on the live API when a filter used a comparator the grammar does not have:
+        the run printed ``warning: hrv: ... HTTP 400 ...`` among the other datasets' "all
+        good" lines, and a person reads that as "hrv had a nuisance" rather than "there is
+        no HRV in the store". The exit code was 3 all along; the label has to match it.
+        """
+        refused = Path(self.home / "refused")
+        refused.mkdir()
+        for path in sorted(FIXTURES.glob("*.json")):
+            payload = json.loads(path.read_text())
+            if "daily-heart-rate-variability" in str(payload.get("request", {}).get("path", "")):
+                payload["response"] = {
+                    "status": 400,
+                    "body": {
+                        "error": {
+                            "code": 400,
+                            "status": "INVALID_ARGUMENT",
+                            "message": (
+                                "Invalid data point filter: INVALID_DATA_POINT_FILTER_RESTRICTION_COMPARATOR"
+                            ),
+                        }
+                    },
+                    "headers": {},
+                }
+            (refused / path.name).write_text(json.dumps(payload))
+        _code, text = self.fm(
+            "import", "--fixtures", str(refused), "--since", SINCE, "--until", UNTIL, expect=EXIT_PARTIAL_FAILURE
+        )
+        self.assertIn("INVALID_ARGUMENT", text)
+        self.assertIn("error: hrv:", text, "a refused dataset reads as a failure")
+        self.assertNotIn("warning: hrv:", text, "and not as a nuisance")
+        self.assertIn("not marked imported", text, "and says the retry is the same command")
+
+        # `fm import report` exits with the run's code, so the failure is visible to a
+        # cron job that only looks at the exit status of the report it just read.
+        _code, text = self.fm("import", "report", "--json", expect=EXIT_PARTIAL_FAILURE)
+        stored = json.loads(text)
+        self.assertTrue(stored["errors"], "the stored report keeps the failure separate")
+        self.assertTrue(all(e.startswith("hrv:") for e in stored["errors"]))
+        self.assertNotIn("INVALID_ARGUMENT", json.dumps(stored["warnings"]))
+
     def test_a_big_pull_is_confirmed_or_said_to_be_unattended(self) -> None:
         config = self.home / "config" / "fitbit-monitor" / "config.toml"
         config.parent.mkdir(parents=True, exist_ok=True)

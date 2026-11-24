@@ -177,10 +177,24 @@ class ImportReport:
         return totals
 
     @property
+    def errors(self) -> list[str]:
+        """What failed, as distinct from what landed with something odd about it.
+
+        Worth its own list because "warning" is a word people skim: a dataset whose
+        requests were refused has no rows in the store, and the run exited 3 or 1, which
+        is not a warning. This is the line a live ``400 INVALID_ARGUMENT`` produced, and it
+        read like a nuisance.
+        """
+        return [f"{d.dataset}: {d.error}" for d in self.datasets if d.error]
+
+    @property
     def warnings(self) -> list[str]:
-        """Things a reader should look at - run-level ``notes`` are informational."""
+        """Things a reader should look at that are not failures - see :attr:`errors`.
+
+        Run-level ``notes`` are informational; a quarantine is data that landed and could
+        not be read, which is a warning and not a failure.
+        """
         out = [f"{d.dataset}: {note}" for d in self.datasets for note in d.notes]
-        out.extend(f"{d.dataset}: {d.error}" for d in self.datasets if d.error)
         out.extend(f"{d.dataset}: {d.quarantined} payload(s) quarantined" for d in self.datasets if d.quarantined)
         return out
 
@@ -217,6 +231,7 @@ class ImportReport:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "duration_ms": self.duration_ms,
             "notes": list(self.notes),
+            "errors": self.errors,
             "warnings": self.warnings,
             "totals": self.totals,
             "datasets": [d.as_dict() for d in sorted(self.datasets, key=lambda d: d.dataset)],

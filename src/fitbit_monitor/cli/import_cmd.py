@@ -47,7 +47,7 @@ from ..errors import StoreUnavailableError, UsageError
 from ..ingest.csv_source import CsvImport, parse_export, summarise_files
 from ..ingest.importer import ImportPlanner, Importer, NullProgress, day_window
 from ..ingest.pipeline import Ingest
-from ..ingest.report import EXIT_INTERRUPTED, ImportReport
+from ..ingest.report import EXIT_INTERRUPTED, EXIT_PARTIAL_FAILURE, EXIT_TOTAL_FAILURE, ImportReport
 from ..ingest.runlog import RunLog
 from ..store.watermarks import Watermarks
 from ..store.writer import SeriesStore, write_lock
@@ -410,12 +410,18 @@ def _present(args: argparse.Namespace, session: Session, report: ImportReport) -
     )
     for note in report.notes:
         print(f"  note: {note}")
+    # "warning" is a word people skim past; a dataset that was refused has no rows in the
+    # store, and that has to read like the failure it is.
+    for error in report.errors:
+        print(f"  error: {error}")
     for warning in report.warnings:
         print(f"  warning: {warning}")
     if report.path:
         print(f"  report: {report.path}")
     if report.exit_code == EXIT_INTERRUPTED:
         print("  interrupted: completed chunks are stored - re-run the same command to continue")
+    elif report.exit_code in (EXIT_PARTIAL_FAILURE, EXIT_TOTAL_FAILURE):
+        print("  the failed days were not marked imported: fix the cause, then re-run the same command")
     return report.exit_code
 
 
@@ -497,6 +503,8 @@ def cmd_import_report(args: argparse.Namespace, session: Session) -> int:
             f"  {dataset['dataset']:<15} {dataset['status']:<10} +{dataset['rows_inserted']:<6} "
             f"watermark {dataset['watermark'] or '-'}{note}"
         )
+    for error in payload.get("errors", []):
+        print(f"  error: {error}")
     for warning in payload.get("warnings", []):
         print(f"  warning: {warning}")
     return int(payload.get("exit_code", EXIT_OK))

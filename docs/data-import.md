@@ -190,11 +190,17 @@ Failures are per dataset, and the run reports *partial* rather than pretending:
 |---|---|---|
 | `[api]` names a host that was switched off (the retired Fitbit Web API) | refused before any request, with the date and the alternative | 6 |
 | one dataset 403s (scope, or no SpO2 on the account) | that dataset `failed`, the rest `ok` | 3 |
+| a request the API refuses - `400 INVALID_ARGUMENT` from a filter this build got wrong | that dataset `failed`, printed as `error:` and not `warning:` | 3 |
 | a data type the token cannot read, inside a dataset that otherwise answered | `info` note naming `MISSING_OAUTH_SCOPE`, rows from the rest still land | 0 |
 | a period with nothing in it | nothing: v4 answers an empty window with an empty page | 0 |
 | payload is not JSON / a row is unusable | counted in `quarantined`, body kept | 5 |
 | everything failed | `failed` | 1 |
 | Ctrl-C | `interrupted`, completed chunks stored | 130 |
+
+A failed dataset prints `error:`, not `warning:`, because the rows are not in the store and
+a word people skim is how a whole dataset goes missing quietly. And the recovery is always
+the same command: a watermark only moves over days that finished, so nothing that failed was
+marked imported.
 
 `fm import history`, `fm import watermarks` and `fm import report` answer "what did
 that run do?" afterwards - the history lives in the `dataset_run` table, one row per
