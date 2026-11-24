@@ -418,6 +418,10 @@ those shapes and do not prove the analyzer answers that way. The corpus says so 
    PKCE loopback flow needed no change; the token plane moved to
    `oauth2.googleapis.com`, and an `invalid_grant` from a Testing-status client says
    *re-consent, this is expected after seven days* rather than *your client id is wrong*.
+   `prompt=consent` is sent when the configured scopes are not the ones granted - or when
+   the stored grant has no refresh token, since Google does not hand one out again on a
+   silent authorisation, and an hour token with no way to renew it is the failure this
+   whole item was written to avoid.
 4. `api/http.py` + `api/client.py`: local 5 req/s token bucket, `Retry-After`, jittered
    backoff on `429/503/504`, `Retry` semantics per AIP error catalog; delete the
    `X-RateLimit-*` budget or keep it as an *additional* signal. **Done 2026-11-23.**

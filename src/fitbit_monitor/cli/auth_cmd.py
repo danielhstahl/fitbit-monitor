@@ -66,9 +66,15 @@ def cmd_auth_login(args: argparse.Namespace, session: Session) -> int:
         print(note)
     flow = PkceFlow.new()
     url = flow.authorize_url(
-        client_id=api.client_id, redirect_uri=api.redirect_uri, scopes=scopes, authorize_url=api.authorize_url
+        client_id=api.client_id,
+        redirect_uri=api.redirect_uri,
+        scopes=scopes,
+        authorize_url=api.authorize_url,
+        consent=_needs_consent(session.credentials().load_or_none(), scopes),
     )
     print("1. open this URL in a browser and approve the request:")
+    if "prompt=consent" in url:
+        print("   (re-asking consent: the stored grant does not cover what is configured now)")
     print(f"   {url}")
     code = _collect_code(args, url, api)
     try:
@@ -197,6 +203,24 @@ def cmd_auth_logout(args: argparse.Namespace, session: Session) -> int:
         return EXIT_OK
     print(f"removed {store.path}" if removed else f"nothing to remove at {store.path}")
     return EXIT_OK
+
+
+def _needs_consent(stored: TokenSet | None, scopes: tuple[str, ...]) -> bool:
+    """Whether to send ``prompt=consent``, per the documented pattern in :class:`PkceFlow`.
+
+    Google returns a refresh token on first consent and *not* on a later silent
+    authorisation, so a login that skips the consent screen can come back with an hour
+    token and no way to renew it - which is precisely the case a Testing-status OAuth
+    client lives in, where the consent dies after seven days. Forcing consent is therefore
+    for the moments that need it: the grant on disk covers different scopes than the ones
+    configured now (so those scopes only land if the screen is re-shown), or it carries no
+    refresh token to renew with. Every other login stays silent.
+    """
+    if stored is None:
+        return False  # nothing granted yet; Google shows the screen by itself
+    if not stored.refresh_token:
+        return True
+    return set(stored.scopes) != set(scopes)
 
 
 def _scopes(tokens: TokenSet) -> str:

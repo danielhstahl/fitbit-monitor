@@ -21,7 +21,7 @@ from test_cli import CliTestCase
 
 from import_support import FIXTURES, write_credentials
 from fitbit_monitor.api.auth import CredentialStore, TokenSet
-from fitbit_monitor.api.catalog import ALL_SCOPES
+from fitbit_monitor.api.catalog import ALL_SCOPES, HEALTH_METRICS_SCOPE
 from fitbit_monitor.cli.common import EXIT_USAGE
 from fitbit_monitor.errors import UsageError
 from fitbit_monitor.ingest.report import EXIT_OK
@@ -186,6 +186,29 @@ class AuthCliTest(CliTestCase):
         self.assertIn("code_verifier=", request["body"]), "PKCE (RFC 7636)"
         # ... and the stored token is what the import path reads.
         self.assertEqual(self.fm("import", "--fixtures", str(FIXTURES), "--dry-run")[0], EXIT_OK)
+
+    def test_login_re_asks_consent_only_when_the_stored_grant_differs(self) -> None:
+        """``prompt=consent`` is for the logins that need it, not every login.
+
+        Google hands out a refresh token at consent and not on a later silent
+        authorisation, so forcing the screen every time would be the difference between a
+        tool that renews and one that quietly gets an hour token - but it is also the
+        "sign in with Google" screen people are taught to be careful about. So: forced when
+        the configured scopes are not what is granted, or when there is no refresh token;
+        silent otherwise.
+        """
+        tokens = TokenEndpoint({"access_token": "a", "refresh_token": "r", "expires_in": 28800})
+        self.addCleanup(tokens.close)
+        self._configure_app(token_url=tokens.url)
+
+        write_credentials(self.credentials_path, scopes=(HEALTH_METRICS_SCOPE,))
+        _code, text = self.fm("auth", "login", "--manual", "the-code", expect=EXIT_OK)
+        self.assertIn("prompt=consent", text, "a grant for one scope cannot gain three silently")
+        self.assertIn("re-asking consent", text, "and the user is told why the screen is back")
+
+        write_credentials(self.credentials_path)
+        _code, text = self.fm("auth", "login", "--manual", "the-code", expect=EXIT_OK)
+        self.assertNotIn("prompt=consent", text, "same scopes, same grant: no extra screen")
 
     def test_login_is_refused_before_a_client_id_exists(self) -> None:
         code, text = self.fm("auth", "login", "--manual", "x")
