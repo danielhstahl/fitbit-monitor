@@ -107,12 +107,13 @@ class DoctorTestCase(unittest.TestCase):
         expires_in: float = 8 * 3600,
         mode: int | None = 0o600,
         body: str | None = None,
+        scopes: tuple[str, ...] = ("profile.readonly", "heart_rate.readonly"),
     ) -> TokenSet:
         tokens = TokenSet(
             access_token="access-token-value-for-doctor-tests",
             refresh_token="refresh-token-value-for-doctor-tests",
             expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
-            scopes=("profile.readonly", "heart_rate.readonly"),
+            scopes=scopes,
             user_id="4242",
         )
         self.credentials_path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,6 +281,20 @@ class DoctorTestCase(unittest.TestCase):
             os.chmod(self.data_dir, 0o755)
 
     # --- token ---------------------------------------------------------------
+    def test_the_token_check_prints_scopes_short_enough_to_read(self) -> None:
+        """Four 70-character URLs is not a diagnostic line.
+
+        The short names are what you act on (`sleep.readonly` is missing); the URLs stay
+        available, verbatim, for whatever reads `fm doctor --json`.
+        """
+        self.write_token(scopes=(HEALTH_METRICS_SCOPE, SLEEP_SCOPE))
+        token = next(check for check in self.doctor_json()["checks"] if check["check"] == "token")
+        self.assertEqual(
+            token["scopes"], ["health_metrics_and_measurements.readonly", "sleep.readonly"]
+        )
+        self.assertNotIn("googleapis.com", json.dumps(token["scopes"]))
+        self.assertEqual(token["scope_urls"], [HEALTH_METRICS_SCOPE, SLEEP_SCOPE])
+
     def test_no_token_warns_and_says_what_to_run(self) -> None:
         token = next(check for check in self.doctor_json()["checks"] if check["check"] == "token")
         self.assertEqual(token["status"], WARN)

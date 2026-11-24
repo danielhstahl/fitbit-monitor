@@ -319,7 +319,11 @@ def check_token(ctx: Context) -> Check:
         {
             "mode": "600",
             "user_id": tokens.user_id,
-            "scopes": list(tokens.scopes),
+            # Short names, because a doctor line that wraps is a line nobody reads; the
+            # URLs are four lines of noise that differ only in the middle word. --json
+            # still carries them verbatim, under the name they are called by.
+            "scopes": [short_scope(scope) for scope in tokens.scopes],
+            "scope_urls": list(tokens.scopes),
             "expires_at": tokens.expires_at,
             "seconds_left": int(tokens.seconds_left(ctx.now)),
             "expired": tokens.seconds_left(ctx.now) <= 0,
