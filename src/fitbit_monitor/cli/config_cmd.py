@@ -108,6 +108,20 @@ def require_api_config(session: Session) -> ApiSettings:
     return api
 
 
+def _scope_advice(api: ApiSettings) -> list[str]:
+    """What the config's scope lines need explaining, problems first.
+
+    A ``[api] scopes`` entry that is not a Google scope stops a consent request; a retired
+    Fitbit name has been rewritten, which is worth a line because the config and the
+    consent screen now spell the same thing differently. Both are printed by the two
+    commands that can act on them: ``config show`` to see it, ``config init`` which fixes
+    the file by writing the scopes this build actually asks for.
+    """
+    return [f"scope:    {problem}" for problem in api.scope_problems] + [
+        f"scope:    {note}" for note in api.scope_notes
+    ]
+
+
 def render_starter(session: Session) -> str:
     api = session.config.api
     return STARTER.format(
@@ -121,6 +135,8 @@ def render_starter(session: Session) -> str:
 def cmd_config_init(args: argparse.Namespace, session: Session) -> int:
     path = session.paths.config
     text = render_starter(session)
+    for line in _scope_advice(session.config.api):
+        print(line)
     if args.print_only:
         print(text)
         return EXIT_OK
@@ -181,6 +197,8 @@ def cmd_config_show(args: argparse.Namespace, session: Session) -> int:
     print(f"reports:  {payload['imports_dir']}")
     api = config.api
     print(f"api:      client_id={api.client_id or '(not set)'} redirect_uri={api.redirect_uri}")
+    for line in _scope_advice(api):
+        print(line)
     print(f"source:   {source.short()}")
     if source.is_retired:
         print(f"          {WORKING_TODAY}")

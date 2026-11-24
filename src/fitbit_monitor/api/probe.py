@@ -374,7 +374,10 @@ def run_probe(
     granted = tuple(client.tokens.scopes)
     names = _resolve(datasets)
     timezone = timezone or client.settings.timezone
-    requested = tuple(client.api.scopes) or ALL_SCOPES
+    # Not `or ALL_SCOPES` inline: a configured scope this build cannot map is a config
+    # problem, and reporting a narrowed "requested" list as if it were the plan would hide
+    # the one thing the user has to fix.
+    requested = client.api.scopes_to_request()
 
     recorder = _HeaderRecorder(client.transport)
     client.transport = recorder

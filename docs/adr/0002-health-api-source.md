@@ -159,6 +159,30 @@ and skips the rest with a reason (`catalog.permitted_datasets`,
 granted scopes come from the OAuth token response, and the account probe becomes
 `users/getProfile` instead of `/1/user/-/profile.json`.
 
+**Amendment, 2026-11-24: the retired names are still on disk.** §10's step 2 landed, and a
+login then came back `Error 400: invalid_scope / Request details: flowName=GeneralOAuthFlow`
+from `accounts.google.com`. The transport was not wrong: `[api] scopes` in an existing
+`config.toml` still held the six Fitbit names this tool's own `fm config init` wrote until
+this ADR, and a consent request carrying them is Google's least-legible error, in a browser
+tab, after the password. So the names are resolved where every other scope decision is made.
+`catalog.LEGACY_SCOPES` maps each retired name to the row above that now covers it - the
+five heart-ish names collapse onto `health_metrics_and_measurements.readonly`, exactly as
+this section's table says they should - `ApiSettings` applies the map on load and reports
+every rewrite, and the consent URL can only ever carry `googlehealth.*`. A name that maps
+to nothing (`nutrition`, `settings`, any `.writeonly`) is fatal at the request rather than
+at config load, because `fm config show` and `fm config init --force` have to be able to
+read the file they are reporting or repairing - the same rule §10 set for a retired
+`base_url`.
+
+Re-verified against the live endpoint on 2026-11-24, with a plain GET on the consent URL (no
+secret, no browser): the four scopes above each pass and all four together pass; the legacy
+six come back `invalid_scope` with Google's own breakdown -
+`invalid=[sleep, activity, heartbeat, spo2, heart_profile]`, `valid=[userinfo.profile]`, so
+five of the six were never scopes Google would accept; and a made-up
+`googlehealth.not_a_real_scope.readonly` is rejected too, which is why a *real* scope this
+build has no reader for (`.ecg`, say) is a note rather than an error - Google is the
+authority on which names exist, and this build is the authority on which ones it uses.
+
 ### 5. Whether a person can get this, and what it costs
 
 Three paths exist; the first is the one this tool documents.

@@ -80,7 +80,7 @@ python -m pytest -q                  # the scaffolded contract suite, same one C
 
 | command | what it does |
 |---|---|
-| `fm auth login [--manual CODE] [--no-browser] [--timeout S]` | OAuth2 PKCE login in the browser; token stored `0600`, refreshed on use |
+| `fm auth login [--manual CODE] [--no-browser] [--timeout S]` | OAuth2 PKCE login in the browser; token stored `0600`, refreshed on use; a stale `[api] scopes` line is refused here, not as a Google 400 in the browser |
 | `fm auth status [--json]` / `fm auth logout` | what is granted, and getting rid of it |
 | `fm api source [--verify] [--json]` | which API this build dials and whether that host is still a service; `--verify` asks each host live, no credentials needed |
 | `fm api probe [--dataset N] [--since D] [--until D] [--no-history] [--max-requests N] [--json]` | ask the API why an import lands nothing: granted vs wanted scopes, per-dataset data/403/404, rate-limit state, earliest date available |

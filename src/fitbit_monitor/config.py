@@ -234,6 +234,12 @@ class ApiSettings:
     redirect_host: str = "localhost"
     redirect_port: int = 55413
     scopes: tuple[str, ...] = ()
+    #: What :func:`fitbit_monitor.api.catalog.resolve_scopes` had to say about the
+    #: configured scopes: one line per retired Fitbit name it rewrote, one line per entry
+    #: that cannot be asked for at all (ADR-0002 §4). Commands print the first and refuse
+    #: on the second - see :meth:`scopes_to_request`.
+    scope_notes: tuple[str, ...] = ()
+    scope_problems: tuple[str, ...] = ()
     #: The v4 user path segment. ``me`` is the authenticated account; the numeric
     #: ``healthUserId`` from ``users/getIdentity`` also works, and is what a setup that
     #: imports more than one account would set here.
@@ -246,13 +252,49 @@ class ApiSettings:
     credentials_path: Path | None = None
 
     def __post_init__(self) -> None:
-        """Register the client secret as a secret, the moment it is read.
+        """Register the client secret as a secret, and make the scopes sendable.
 
         Config files are loaded on every command, so this is what makes "the client
         secret never appears in a log line" true without a single call site having to
         remember to be careful - see :mod:`fitbit_monitor.logsecrets`.
+
+        The same choke point then applies to scopes: a ``[api] scopes`` list written for
+        the retired Fitbit API named ``activity``, ``spo2``, ``heart_profile`` and so on,
+        and those strings are not Google scopes. Dialling the consent endpoint with them
+        fails with ``400 invalid_scope`` in a browser tab, after the user has typed their
+        password, which is a terrible place to learn that a config line is stale. So the
+        names are resolved to ``googlehealth.*`` here, on every path that builds an
+        ``ApiSettings``.
+
+        Nothing unresolvable is *raised* here, deliberately: ``fm config init --force`` and
+        ``fm config show`` load the config they are about to fix or report, and refusing to
+        build settings would lock the user out of both. :meth:`scopes_to_request` is where
+        it becomes fatal - the same shape as a retired ``base_url``, which is refused at use
+        and still reported by ``fm doctor``.
         """
         logsecrets.remember(self.client_secret)
+        # Imported here because catalog pulls in the store, which pulls in config.
+        from .api.catalog import resolve_scopes
+
+        scopes, notes, rejections = resolve_scopes(self.scopes)
+        object.__setattr__(self, "scopes", scopes)
+        object.__setattr__(self, "scope_notes", notes)
+        object.__setattr__(self, "scope_problems", rejections)
+
+    def scopes_to_request(self) -> tuple[str, ...]:
+        """The ``scope`` list for a consent request, or the reason there cannot be one.
+
+        Empty means "everything this build reads", and a scope this program cannot map to
+        a Google scope stops the request rather than becoming Google's problem to explain.
+        """
+        from .api.catalog import ALL_SCOPES
+
+        if self.scope_problems:
+            raise ConfigError(
+                "[api] scopes cannot be asked for: " + "; ".join(self.scope_problems),
+                hint="fix [api] scopes in config.toml, or run 'fm config init --force' to rewrite the file",
+            )
+        return tuple(self.scopes) or ALL_SCOPES
 
     @property
     def redirect_uri(self) -> str:
@@ -272,6 +314,8 @@ class ApiSettings:
             "client_secret_set": bool(self.client_secret),
             "redirect_uri": self.redirect_uri,
             "scopes": list(self.scopes),
+            "scope_notes": list(self.scope_notes),
+            "scope_problems": list(self.scope_problems),
             "user_id": self.user_id,
             "timeout": self.timeout,
             "retries": self.retries,

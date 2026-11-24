@@ -50,6 +50,7 @@ from typing import Any, Callable, Mapping
 from .. import logsecrets
 from ..errors import UsageError
 from ..timeutil import ensure_utc, utcnow
+from .catalog import SCOPE_PREFIX
 from .errors import CredentialsExpiredError, NotAuthenticatedError
 from .http import Response
 
@@ -114,6 +115,15 @@ class PkceFlow:
         """
         if not scopes:
             raise UsageError("no scopes requested", hint="set [api] scopes in config.toml")
+        # Last line of defence. ApiSettings resolves scope names on load, but this is the
+        # one call that puts them in front of Google, and Google's answer to a scope it
+        # does not know is a 400 page that says nothing a user can act on.
+        not_google = [s for s in scopes if not s.startswith(SCOPE_PREFIX)]
+        if not_google:
+            raise UsageError(
+                f"refusing to ask Google for {', '.join(not_google)}: not Google Health scopes",
+                hint="fix [api] scopes in config.toml; 'fm config init --force' writes the current ones",
+            )
         fields = {
             "response_type": "code",
             "client_id": client_id,

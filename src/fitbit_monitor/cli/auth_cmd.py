@@ -18,7 +18,7 @@ import sys
 from datetime import timedelta
 
 from ..api.auth import LoopbackCallback, PkceFlow, exchange_code, fetch_redirect_manually, open_browser
-from ..api.catalog import ALL_SCOPES, short_scope
+from ..api.catalog import short_scope
 from ..api.auth import TokenSet
 from ..api.errors import CredentialsExpiredError
 from ..api.source import LEGACY_SUNSET, TOKEN_PLANE_SETTINGS, guard as guard_endpoints, state_of
@@ -29,7 +29,7 @@ from .config_cmd import require_api_config
 
 
 def register(sub: "argparse._SubParsersAction") -> None:
-    auth = sub.add_parser("auth", help="authorize fm against your Fitbit account")
+    auth = sub.add_parser("auth", help="authorize fm with Google, for your Fitbit data")
     asub = auth.add_subparsers(dest="auth_command", required=True)
 
     login = asub.add_parser("login", help="authorize and store the tokens")
@@ -52,7 +52,14 @@ def register(sub: "argparse._SubParsersAction") -> None:
 
 def cmd_auth_login(args: argparse.Namespace, session: Session) -> int:
     api = require_api_config(session)
-    scopes = tuple(api.scopes) or ALL_SCOPES
+    # Refuses a scope this program cannot map to a Google scope, before the browser opens:
+    # Google's own answer to that is a 400 page that names nothing the user can act on.
+    scopes = api.scopes_to_request()
+    # Say out loud what was rewritten. A config written before ADR-0002 listed Fitbit's
+    # scope names, and while they are translated on load, a consent screen that says
+    # "activity_and_fitness" under a config that says "activity" needs explaining.
+    for line in api.scope_notes:
+        print(f"note: {line}", file=sys.stderr)
     client = session.api_client()
     # Refuse a retired token endpoint before the browser opens, not after the code comes
     # back: the consent page still renders, so a user who gets as far as "approve" is

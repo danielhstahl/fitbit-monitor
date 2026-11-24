@@ -20,11 +20,31 @@ from pathlib import Path
 from test_cli import CliTestCase
 
 from import_support import FIXTURES, write_credentials
-from fitbit_monitor.api.auth import CredentialStore, TokenSet
-from fitbit_monitor.api.catalog import ALL_SCOPES, HEALTH_METRICS_SCOPE
+from fitbit_monitor.api.auth import CredentialStore, PkceFlow, TokenSet
+from fitbit_monitor.api.catalog import ACTIVITY_SCOPE, ALL_SCOPES, HEALTH_METRICS_SCOPE
 from fitbit_monitor.cli.common import EXIT_USAGE
 from fitbit_monitor.errors import UsageError
 from fitbit_monitor.ingest.report import EXIT_OK
+
+
+class ConsentUrlScopeGuardTest(unittest.TestCase):
+    """The last line of defence is the one that builds the URL.
+
+    ``ApiSettings`` resolves scope names on load, but ``PkceFlow`` can be handed any list -
+    a tool, a script, a future caller - and Google's response to a scope it does not know
+    is a 400 that explains nothing to the person staring at it.
+    """
+
+    def test_a_scope_that_is_not_googles_never_reaches_google(self) -> None:
+        flow = PkceFlow.new()
+        with self.assertRaises(UsageError) as caught:
+            flow.authorize_url(client_id="c", redirect_uri="http://localhost:1/", scopes=("spo2", ACTIVITY_SCOPE))
+        self.assertIn("spo2", str(caught.exception))
+        self.assertIn("config init", caught.exception.hint or "")
+
+    def test_google_scopes_build_a_url(self) -> None:
+        url = PkceFlow.new().authorize_url(client_id="c", redirect_uri="http://localhost:1/", scopes=(ACTIVITY_SCOPE,))
+        self.assertIn("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgooglehealth.activity_and_fitness.readonly", url)
 
 
 class TokenEndpoint:
@@ -215,12 +235,49 @@ class AuthCliTest(CliTestCase):
         self.assertEqual(code, EXIT_USAGE)
         self.assertIn("client_id", text)
 
-    def _configure_app(self, *, token_url: str | None = None) -> None:
+    def test_a_config_that_predates_the_google_api_is_translated_out_loud(self) -> None:
+        """``fm config init`` used to ship Fitbit's scope names; they are not Google's.
+
+        The six names ``activity heart_profile heartbeat profile sleep spo2`` sent to
+        ``accounts.google.com`` come back as ``Error 400: invalid_scope, Request details:
+        flowName=GeneralOAuthFlow`` - after the password, in a browser tab, saying nothing
+        a user can act on. So the config is translated on load, the consent URL carries only
+        ``googlehealth.*``, and the rewrite is announced rather than silent.
+        """
+        tokens = TokenEndpoint({"access_token": "a", "refresh_token": "r", "expires_in": 28800})
+        self.addCleanup(tokens.close)
+        self._configure_app(
+            token_url=tokens.url,
+            scopes='["activity", "heart_profile", "heartbeat", "profile", "sleep", "spo2"]',
+        )
+        _code, text = self.fm("auth", "login", "--manual", "the-code", expect=EXIT_OK)
+        url = next(line for line in text.splitlines() if "scope=" in line)
+        for retired in ("spo2", "heart_profile", "heartbeat", "scope%3Dactivity%20"):
+            self.assertNotIn(retired, url, f"{retired} is not a Google scope")
+        for scope in ("health_metrics_and_measurements", "activity_and_fitness", "sleep.readonly", "profile.readonly"):
+            self.assertIn(scope, url, "the grant asks for what this build reads")
+        self.assertIn('"spo2" was a Fitbit scope; it is now health_metrics_and_measurements.readonly', text)
+        self.assertIn('"activity" was a Fitbit scope; it is now activity_and_fitness.readonly', text)
+
+    def test_a_scope_google_cannot_grant_stops_before_the_browser(self) -> None:
+        """Something unmappable is a config error in a terminal, not a 400 in a browser."""
+        self._configure_app(
+            scopes='["spo2", "nutrition", "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.writeonly"]',
+        )
+        code, text = self.fm("auth", "login", "--manual", "x", expect=EXIT_USAGE)
+        self.assertIn("nutrition", text, "the line that cannot be asked for is named")
+        self.assertIn("writeonly", text)
+        self.assertIn("config init", text, "and the way to fix it is printed")
+        self.assertNotIn("open this URL", text, "no consent request goes out with a bad scope in it")
+
+    def _configure_app(self, *, token_url: str | None = None, scopes: str | None = None) -> None:
         config = self.home / "config" / "fitbit-monitor" / "config.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
         text = '[api]\nclient_id = "test-client"\nclient_secret = "test-secret"\n'
         if token_url:
             text += f'token_url = "{token_url}"\n'
+        if scopes:
+            text += f"scopes = {scopes}\n"
         config.write_text(text)
 
     def test_login_help_documents_the_headless_path(self) -> None:
@@ -285,6 +342,28 @@ class ConfigCliTest(CliTestCase):
         code, text = self.fm("config", "show")
         self.assertEqual(code, EXIT_USAGE)
         self.assertIn("config", text.lower())
+
+    def test_config_commands_still_run_on_scopes_the_api_cannot_be_asked_for(self) -> None:
+        """A broken ``scopes`` line must not lock the user out of fixing it.
+
+        ``fm auth login`` refuses to dial consent with a scope Google will reject, but the
+        commands that report and repair the file load it too - so they keep working, say
+        what is wrong, and ``config init --force`` writes a file whose scopes this build can
+        actually ask for. Same rule as a retired ``base_url``.
+        """
+        config = self.home / "config" / "fitbit-monitor" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('[api]\nclient_id = "cid"\nclient_secret = "s"\nscopes = ["nutrition"]\n')
+
+        _code, text = self.fm("config", "show", expect=EXIT_OK)
+        self.assertIn("nutrition", text)
+        self.assertIn("no replacement", text)
+
+        _code, text = self.fm("config", "init", "--force", expect=EXIT_OK)
+        self.assertIn("nutrition", text, "the rewrite says what it dropped")
+        written = config.read_text()
+        self.assertNotIn("nutrition", written)
+        self.assertIn("googlehealth.activity_and_fitness.readonly", written)
 
 
 if __name__ == "__main__":  # pragma: no cover

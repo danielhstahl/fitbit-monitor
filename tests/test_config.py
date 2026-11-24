@@ -12,7 +12,14 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from fitbit_monitor.config import AppConfig, PluginConfig, parse_duration
+from fitbit_monitor.api.catalog import (
+    ACTIVITY_SCOPE,
+    ALL_SCOPES,
+    HEALTH_METRICS_SCOPE,
+    PROFILE_SCOPE,
+    SLEEP_SCOPE,
+)
+from fitbit_monitor.config import ApiSettings, AppConfig, PluginConfig, parse_duration
 from fitbit_monitor.errors import ConfigError, UsageError
 from fitbit_monitor.paths import Paths
 from fitbit_monitor.timeutil import DateRange, parse_date_arg
@@ -149,6 +156,77 @@ class ConfigTest(unittest.TestCase):
     def test_appconfig_from_raw_has_no_file_dependency(self) -> None:
         cfg = AppConfig._from_raw(None, {"alerts": {"cooldown": "90m"}})
         self.assertEqual(cfg.alert_cooldown, timedelta(minutes=90))
+
+
+class ApiScopeTest(unittest.TestCase):
+    """``[api] scopes`` - and what happens when the line predates ADR-0002.
+
+    Until ADR-0002, ``fm config init`` wrote Fitbit's own scope names, and a consent request
+    carrying them gets ``Error 400: invalid_scope / flowName=GeneralOAuthFlow`` from
+    accounts.google.com. Nothing may reach that page with a name this program could have
+    resolved itself, so the resolution lives on ``ApiSettings`` - every path that builds one
+    - and the outcome is either a reported rewrite or a config error that names the line.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config_path = Path(self.tmp.name) / "config.toml"
+
+    def scopes(self, text: str) -> ApiSettings:
+        self.config_path.write_text(f'[api]\nclient_id = "cid"\nscopes = {text}\n', encoding="utf-8")
+        return AppConfig.load(self.config_path).api
+
+    def test_the_retired_fitbit_names_become_the_google_ones(self) -> None:
+        api = self.scopes('["activity", "heart_profile", "heartbeat", "profile", "sleep", "spo2"]')
+        self.assertEqual(
+            set(api.scopes_to_request()), {ACTIVITY_SCOPE, HEALTH_METRICS_SCOPE, PROFILE_SCOPE, SLEEP_SCOPE}
+        )
+        self.assertEqual(api.scope_problems, ())
+
+    def test_a_rewrite_is_reported_not_swallowed(self) -> None:
+        """A consent screen and a config that spell the same grant differently need saying."""
+        api = self.scopes('["spo2"]')
+        self.assertEqual(api.scopes_to_request(), (HEALTH_METRICS_SCOPE,))
+        self.assertEqual(
+            api.scope_notes,
+            ('"spo2" was a Fitbit scope; it is now health_metrics_and_measurements.readonly',),
+        )
+
+    def test_nothing_configured_means_everything_this_build_reads(self) -> None:
+        self.scopes("[]")
+        self.assertEqual(self.scopes("[]").scopes_to_request(), ALL_SCOPES)
+
+    def test_a_name_that_is_not_a_google_scope_stops_the_request(self) -> None:
+        api = self.scopes('["totally-bogus"]')
+        self.assertEqual(api.scopes, ())
+        with self.assertRaises(ConfigError) as caught:
+            api.scopes_to_request()
+        self.assertIn("totally-bogus", str(caught.exception), "the offender is named")
+        self.assertIn("config init", caught.exception.hint or "", "and the fix is printed")
+
+    def test_a_retired_name_with_no_successor_says_so(self) -> None:
+        """Silently dropping `nutrition` would promise a scope nobody asked for."""
+        api = self.scopes('["nutrition", "profile"]')
+        self.assertEqual(api.scopes, (PROFILE_SCOPE,), "the half that resolves still resolves")
+        with self.assertRaises(ConfigError) as caught:
+            api.scopes_to_request()
+        self.assertIn("nutrition", str(caught.exception))
+        self.assertIn("no replacement", str(caught.exception))
+
+    def test_a_write_scope_is_refused_because_this_tool_never_writes(self) -> None:
+        api = self.scopes('["https://www.googleapis.com/auth/googlehealth.activity_and_fitness.writeonly"]')
+        with self.assertRaises(ConfigError) as caught:
+            api.scopes_to_request()
+        self.assertIn("never writes", str(caught.exception))
+
+    def test_a_google_scope_this_build_does_not_read_is_kept_with_a_note(self) -> None:
+        """Google ships scopes; a config naming a new one is not an error, just worth a note."""
+        ecg = "https://www.googleapis.com/auth/googlehealth.ecg.readonly"
+        api = self.scopes(f'["{ecg}"]')
+        self.assertEqual(api.scopes_to_request(), (ecg,))
+        self.assertEqual(api.scope_notes, ("ecg.readonly is not a scope this build reads data for",))
+        self.assertEqual(api.scope_problems, ())
 
 
 class DurationTest(unittest.TestCase):

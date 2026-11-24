@@ -66,6 +66,79 @@ ALL_SCOPES: tuple[str, ...] = (
 #: ``.writeonly`` scopes, named only so a config that lists one gets told why.
 WRITE_SCOPES_HINT = "this tool never writes health data; remove the .writeonly scope"
 
+#: The bare scope names the retired Fitbit Web API used, and the Google scope that now
+#: covers them. These are not Google scopes and never were - but they are still sitting
+#: in ``[api] scopes`` on every disk that ran ``fm config init`` before ADR-0002, and
+#: sending one to ``accounts.google.com`` produces ``400 invalid_scope`` /
+#: ``flowName=GeneralOAuthFlow`` in a browser tab, which is the least place in the
+#: system that can explain itself. So they are translated here, once, and the caller is
+#: told that it happened.
+LEGACY_SCOPES: Mapping[str, str] = {
+    "profile": PROFILE_SCOPE,
+    "activity": ACTIVITY_SCOPE,
+    "sleep": SLEEP_SCOPE,
+    # The retired API split body data five ways; one Google grant covers all of it now,
+    # so several old names landing on one scope is the expected outcome.
+    "heart_rate": HEALTH_METRICS_SCOPE,
+    "heart_profile": HEALTH_METRICS_SCOPE,
+    "heartbeat": HEALTH_METRICS_SCOPE,
+    "spo2": HEALTH_METRICS_SCOPE,
+    "cardiofitness": HEALTH_METRICS_SCOPE,
+    "weight": HEALTH_METRICS_SCOPE,
+}
+
+#: Retired names with no v4 successor. Better to say "dropped" than to silently keep a
+#: scope that asks for nothing, or to fail with "not a scope".
+DROPPED_SCOPES: Mapping[str, str] = {
+    "nutrition": "the v4 API has no nutrition resource",
+    "settings": "device settings are deliberately not requested (ADR-0002 §4)",
+    "locations": "device locations are deliberately not requested (ADR-0002 §4)",
+}
+
+
+def resolve_scopes(scopes: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Turn whatever a config lists into scopes Google will accept.
+
+    Returns ``(scopes, notes, rejections)``, in that order:
+
+    * ``scopes``: the de-duplicated Google scopes to ask for, in config order;
+    * ``notes``: one line per retired Fitbit name that was rewritten or that names a
+      Google scope this build has no reader for - things the user should be told, not
+      things that should stop a request;
+    * ``rejections``: one line per entry that cannot be asked for at all, naming the
+      entry and why.
+
+    Nothing here decides whether a rejection is fatal;
+    :class:`~fitbit_monitor.config.ApiSettings` treats it as a config error via
+    :meth:`~fitbit_monitor.config.ApiSettings.scopes_to_request`, which is what keeps the
+    failure in the terminal instead of in a Google error page.
+    """
+    resolved: list[str] = []
+    notes: list[str] = []
+    rejections: list[str] = []
+    for entry in scopes:
+        name = str(entry).strip()
+        if not name:
+            continue
+        if name.startswith(SCOPE_PREFIX):
+            if name.endswith(".writeonly"):
+                rejections.append(f"{short_scope(name)}: {WRITE_SCOPES_HINT}")
+                continue
+            if name not in ALL_SCOPES:
+                notes.append(f"{short_scope(name)} is not a scope this build reads data for")
+            if name not in resolved:
+                resolved.append(name)
+        elif name in LEGACY_SCOPES:
+            target = LEGACY_SCOPES[name]
+            notes.append(f'"{name}" was a Fitbit scope; it is now {short_scope(target)}')
+            if target not in resolved:
+                resolved.append(target)
+        elif name in DROPPED_SCOPES:
+            rejections.append(f'"{name}" was a Fitbit scope and has no replacement: {DROPPED_SCOPES[name]}')
+        else:
+            rejections.append(f"{name!r} is not a Google Health scope; they start with {SCOPE_PREFIX}")
+    return tuple(resolved), tuple(notes), tuple(rejections)
+
 # --- the shapes of the API (ADR-0002 §6, §7) -------------------------------
 #: The resource root every data-point request hangs off. ``me`` is the authenticated
 #: user; :func:`fitbit_monitor.api.auth.identity` can resolve the numeric id.

@@ -41,6 +41,28 @@ token file is not where you expected.
 >   decided instead    Google Health API  https://health.googleapis.com/v4
 >   decision           docs/adr/0002-health-api-source.md (section 10 is the port)
 >   works today        `fm import --source csv --path ARCHIVE` (Google Takeout) needs no API at all
+>
+> Scope names go the same way, because an existing config can outlive the API it was
+> written for. `fm config init` used to write Fitbit's own scope names - `activity`,
+> `heart_profile`, `heartbeat`, `profile`, `sleep`, `spo2` - and none of them is a Google
+> scope: consent comes back as `Error 400: invalid_scope / Request details:
+> flowName=GeneralOAuthFlow`, in a browser tab, after the password, which is the least
+> place in the system that can explain itself. Each retired name is therefore mapped to
+> the `googlehealth.*` scope that now covers it - the five heart-related ones all land on
+> `health_metrics_and_measurements.readonly` - and the rewrite is announced rather than
+> silent:
+>
+> ```console
+> $ fm auth login
+> note: "activity" was a Fitbit scope; it is now activity_and_fitness.readonly
+> note: "spo2" was a Fitbit scope; it is now health_metrics_and_measurements.readonly
+> 1. open this URL in a browser and approve the request:
+> ```
+>
+> A scope that maps to nothing - `nutrition`, `settings`, any `.writeonly`, or a string
+> that is not a Google scope at all - stops the login in the terminal, naming the line:
+> `fm config show` prints why, and `fm config init --force` rewrites the file. Both stay
+> runnable on the broken file on purpose, because they are how you fix it.
 > ```
 >
 > `fm api source --verify` asks the hosts what they are today, with no token and no client
