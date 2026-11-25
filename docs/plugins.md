@@ -215,9 +215,10 @@ That is a wording budget, not a shape the contract enforces: `Alert` requires a 
 message and a timestamp, and nothing stops a plugin writing three words. What the
 contract *does* enforce is that the words are chosen by the plugin and not inherited: a
 `Finding` from the detection engine arrives with no claim in it at all, so nothing can
-reach your user that you did not write. The reference alerting plugin is
-[`hr-anomaly`](#reference-hr-anomaly-the-built-in-alerting-example), and its own test suite
-asserts this framing is present in every message it emits.
+reach your user that you did not write. The reference alerting plugins are
+[`hr-anomaly`](#reference-hr-anomaly-the-built-in-alerting-example) for intraday heart rate
+and [`hrv-anomaly`](#reference-hrv-anomaly-the-built-in-nightly-series-example) for nightly
+HRV, and each one's own test suite asserts its framing is present in every message it emits.
 
 ---
 

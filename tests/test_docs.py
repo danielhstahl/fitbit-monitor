@@ -573,5 +573,97 @@ class PluginContractIsDecidedOnce(unittest.TestCase):
         self.assertTrue(result.wasSuccessful(), "the ADR sample fails the suite it ships")
 
 
+class NightlyDetectorIsDecidedOnce(unittest.TestCase):
+    """ADR-0006 decides why nightly HRV is a second detector, so it must stay true.
+
+    The file earns its place by recording things a later reader would otherwise get
+    wrong: which rule ids and defaults shipped, the two guards that stop a baseline
+    eating itself, what is shared with `hr-anomaly` on purpose, and - most usefully -
+    what is still unmeasured. Every check here is driven from the code, so retuning a
+    default, renaming a rule or quietly deleting the open question all fail here.
+    """
+
+    ADR = DOCS / "adr" / "0006-nightly-series-detector.md"
+
+    #: The phrases that name the two guards. They are the decision in eight words each;
+    #: losing one means someone restructured the scan and forgot why it is shaped so.
+    GUARDS = (
+        "does not join the pool the bar is built from",
+        "of lead-in",
+    )
+
+    def test_the_adr_exists_and_is_accepted(self) -> None:
+        self.assertTrue(self.ADR.is_file(), "docs/adr/0006-nightly-series-detector.md is missing")
+        self.assertIn("- **Status:** accepted", self.ADR.read_text(encoding="utf-8"))
+        self.assertIn("0006-nightly-series-detector.md", (REPO / "README.md").read_text())
+
+    def test_it_names_the_rules_exactly_as_the_detector_exports_them(self) -> None:
+        from fitbit_monitor.anomaly.hrv import FINDING_HRV_HIGH, FINDING_HRV_LOW
+
+        text = self.ADR.read_text(encoding="utf-8")
+        for rule in (FINDING_HRV_LOW, FINDING_HRV_HIGH):
+            self.assertIn(f"`{rule}`", text, f"{rule} is not in the rules table")
+
+    def test_the_defaults_it_quotes_are_the_ones_that_ship(self) -> None:
+        """The rules table may be prose, but it may not be wrong."""
+        from fitbit_monitor.anomaly.hrv import FINDING_HRV_LOW, HrvAnomalyConfig
+
+        config = HrvAnomalyConfig()
+        text = self.ADR.read_text(encoding="utf-8")
+        row = next((line for line in text.splitlines() if line.startswith(f"| `{FINDING_HRV_LOW}`")), None)
+        self.assertIsNotNone(row, "the hrv_low row is missing from the rules table")
+        for value in (config.min_consecutive_nights, config.z_low, config.deep_dip_z):
+            self.assertIn(f"{value:g}", row, f"{value:g} is not in the hrv_low row")
+        self.assertIn("alert_on_high = false", text)
+        self.assertFalse(config.alert_on_high, "the ADR says the high rule ships off")
+        self.assertIn("corroborate = true", text)
+        self.assertTrue(config.corroborate, "the ADR says corroboration ships on")
+
+    def test_it_records_the_two_ways_a_baseline_eats_itself(self) -> None:
+        text = self.ADR.read_text(encoding="utf-8")
+        for phrase in self.GUARDS:
+            self.assertIn(phrase, text, f"the guard '{phrase}' is no longer recorded")
+
+    def test_what_it_calls_shared_really_is_shared(self) -> None:
+        """It claims four imports from `hr-anomaly`; if one stops existing, the claim rots."""
+        from fitbit_monitor.plugins.builtin import hr_anomaly
+
+        source = ""
+        from fitbit_monitor.plugins.builtin import hrv_anomaly
+
+        source = Path(hrv_anomaly.__file__).read_text(encoding="utf-8")
+        for name in ("thin_window_reason", "_fraction", "_duration", "HeldBack"):
+            self.assertTrue(hasattr(hr_anomaly, name), f"ADR-0006 says {name} is reused; it is gone")
+            self.assertIn(name, source, f"hrv_anomaly no longer imports {name}")
+
+    def test_the_framing_sentence_is_its_own_even_though_the_code_is_shared(self) -> None:
+        """Shared disclaimer over a different signal is the decoration this avoids."""
+        from fitbit_monitor.plugins.builtin.hr_anomaly import NON_DIAGNOSTIC, NON_DIAGNOSTIC_CODE
+        from fitbit_monitor.plugins.builtin.hrv_anomaly import (
+            HRV_FRAMING_CODE,
+            NON_DIAGNOSTIC_HRV,
+        )
+
+        self.assertEqual(HRV_FRAMING_CODE, NON_DIAGNOSTIC_CODE)
+        self.assertNotEqual(NON_DIAGNOSTIC_HRV, NON_DIAGNOSTIC)
+        self.assertIn("one HRV number per night", NON_DIAGNOSTIC_HRV)
+
+    def test_it_still_says_what_is_not_measured(self) -> None:
+        """The accuracy gate is the open question; deleting the paragraph is not closing it.
+
+        If someone does build a labelled nightly corpus, this test is the reminder that the
+        ADR has to change as well - which is the whole point of writing the gap down.
+        """
+        text = self.ADR.read_text(encoding="utf-8")
+        fixtures = list((REPO / "tests" / "fixtures" / "anomaly").glob("*hrv*"))
+        if fixtures:
+            self.assertNotIn(
+                "no such gate yet", text,
+                f"{fixtures} exist now: ADR-0006 still claims the nightly detector is unmeasured",
+            )
+        else:
+            self.assertIn("no such gate yet", text, "ADR-0006 must state the missing accuracy gate")
+            self.assertIn("accuracy gate", text)
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -149,6 +149,9 @@ they check, so nightly HRV has its own detector:
 [`src/fitbit_monitor/anomaly/hrv.py`](../src/fitbit_monitor/anomaly/hrv.py), surfaced by the
 `hrv-anomaly` plugin
 ([`plugins/builtin/hrv_anomaly.py`](../src/fitbit_monitor/plugins/builtin/hrv_anomaly.py)).
+The full reasoning - including the option of upsampling nightly values into a fake intraday
+series, and why manufacturing evidence was rejected outright - is
+[ADR-0006](adr/0006-nightly-series-detector.md).
 
 The bar is your own median and MAD of `log(value)` over up to `baseline_nights` nights.
 Log space because HRV is multiplicative - 10 ms off a 30 ms night is not the same event as
@@ -187,6 +190,11 @@ The same three confidence factors as the intraday engine - how far past the bar,
 the baseline, how complete the record - with the same ceiling below 1.0. What an alert says,
 and how to run it, is in
 [docs/plugins.md](plugins.md#reference-hrv-anomaly-the-built-in-nightly-series-example).
+
+One caveat the project keeps on the record: the intraday rules are measured against a
+labelled corpus with CI floors below, and **the nightly rules are not yet**. Their defaults
+were tuned against the seeded corpus and hand-planted scenarios, which shows the arithmetic
+and the plumbing work, not the sensitivity. See ADR-0006's consequences.
 
 ## Confidence, and why it is never 1.0
 

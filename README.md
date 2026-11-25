@@ -219,13 +219,14 @@ budget, and cannot write to the database even by reaching for the raw connection
 SQLite refuses it. Alerts are stored, deduplicated against a cooldown, printed,
 appended to JSONL, and optionally POSTed to one HTTPS webhook.
 
-* [docs/plugins.md](docs/plugins.md) - authoring guide, API reference, and the two
+* [docs/plugins.md](docs/plugins.md) - authoring guide, API reference, and the three
   built-in plugins explained.
 * [docs/storage.md](docs/storage.md) - the store: schema, migrations, the read API,
   the UTC convention, verify/backup/export, and retention.
 * [docs/detection.md](docs/detection.md) - the anomaly engine: personal baselines, the
   sustained-rate and irregularity rules, what a confidence is made of, and what the
-  shipped thresholds were measured to cost on the labelled corpus.
+  shipped thresholds were measured to cost on the labelled corpus. Plus the nightly
+  series (HRV), which has its own rules because one value per day is a different shape.
 * [docs/data-import.md](docs/data-import.md) - auth, planning a pull, resuming an
   interrupted one, CSV backfill, and what each dataset means.
 * [docs/adr/0001-implementation-stack.md](docs/adr/0001-implementation-stack.md) - the
@@ -245,6 +246,10 @@ appended to JSONL, and optionally POSTed to one HTTPS webhook.
   third-party plugin must pass.
 * [docs/adr/0005-ad-hoc-import.md](docs/adr/0005-ad-hoc-import.md) - why chunks,
   watermarks and per-dataset failure are the shape of the importer.
+* [docs/adr/0006-nightly-series-detector.md](docs/adr/0006-nightly-series-detector.md) -
+  why nightly HRV is a second detector rather than a mode of the intraday one: what a
+  rule stated in minutes cannot say about one value per night, how a baseline eats
+  itself, and what is still unmeasured about it.
 * [docs/data-policy.md](docs/data-policy.md) - what leaves the machine (the API you
   ask, and one webhook).
 * [docs/ci.md](docs/ci.md) - the two gates, what each one stops, the artifacts they

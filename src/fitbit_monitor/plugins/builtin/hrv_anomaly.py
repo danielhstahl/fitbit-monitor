@@ -27,7 +27,10 @@ returning a quiet zero.
 
 Everything here describes your own pattern and none of it is medical advice: what is unusual
 for you is not the same as what is wrong, and a HRV dip has a hundred ordinary explanations
-you already know about. See ``docs/adr/0005-heuristics-not-diagnoses.md``.
+you already know about. Why this is its own detector rather than a mode of the
+intraday one is
+``docs/adr/0006-nightly-series-detector.md``; what it says on the wire is
+``docs/plugins.md``.
 
 Configured under ``[plugins.hrv-anomaly]``::
 
