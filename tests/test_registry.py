@@ -314,12 +314,13 @@ class CollisionTest(unittest.TestCase):
                     AppConfig._from_raw(None, {"plugins": {"dirs": [str(directory)]}})
                 )
         self.assertEqual(
-            registry.names(), ["hr-anomaly", "other", "resting_trend"],
+            registry.names(), ["hr-anomaly", "hrv-anomaly", "other", "resting_trend"],
             "every built-in plus the two directory plugins, in name order: the clash cost "
             "the loser its name and nothing else",
         )
         self.assertEqual(
-            [r.name for r in registry.usable()], ["hr-anomaly", "other", "resting_trend"]
+            [r.name for r in registry.usable()],
+            ["hr-anomaly", "hrv-anomaly", "other", "resting_trend"],
         )
         self.assertEqual(registry.get("resting_trend").kind, "directory")
         self.assertEqual([c.name for c in registry.collisions], ["resting_trend"])

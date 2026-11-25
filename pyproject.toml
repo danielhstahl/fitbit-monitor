@@ -35,6 +35,9 @@ resting_trend = "fitbit_monitor.plugins.builtin.resting_trend:RestingTrendPlugin
 # The reference alerting plugin. The name is the CLI and config key (`hr-anomaly`),
 # which is also what `[plugins.hr-anomaly]` in config.toml has to be spelled.
 "hr-anomaly" = "fitbit_monitor.plugins.builtin.hr_anomaly:HrAnomalyPlugin"
+# The nightly-HRV example: the same job as `hr-anomaly` over a series that is one value per
+# night instead of one per minute, so it carries its own statistics module.
+"hrv-anomaly" = "fitbit_monitor.plugins.builtin.hrv_anomaly:HrvAnomalyPlugin"
 
 [project.scripts]
 # Two names, one entrypoint (ADR-0001 §11): `fitbit-monitor` is the name that goes in

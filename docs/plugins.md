@@ -244,6 +244,11 @@ min_sustained_minutes = 20
 min_confidence = 0.3
 cooldown = "36h"
 
+[plugins.hrv-anomaly]            # the nightly-HRV alert plugin: one value per night, its
+enabled = true                   # own detector, its own policy - see the reference near
+field = "rmssd"                  # the end of this file
+min_consecutive_nights = 2
+
 [plugins.my_plugin]
 threshold = 62.0
 
@@ -790,6 +795,137 @@ that an episode stopped happening.
 The source is the long version of everything above, with the reasoning next to each
 decision:
 [`src/fitbit_monitor/plugins/builtin/hr_anomaly.py`](../src/fitbit_monitor/plugins/builtin/hr_anomaly.py).
+
+---
+
+## Reference: `hrv-anomaly`, the built-in nightly-series example
+
+`hr-anomaly` is the example for ~1 440 samples a day. `hrv-anomaly` exists because nightly
+HRV is not that, only smaller: it is **one number per night**, so "sustained for N minutes"
+has no referent, a minutes floor cannot filter a single value, and there is no burst to
+sustain through a gap. Rather than bend the intraday config until it fit, this plugin has its
+own statistics module -
+[`src/fitbit_monitor/anomaly/hrv.py`](../src/fitbit_monitor/anomaly/hrv.py) - and keeps here
+only what a plugin is for: the policy and the prose. The rules and why a nightly bar must be
+built differently are in
+[docs/detection.md](detection.md#nightly-series-hrv-anomaly).
+
+```console
+$ fm plugins show hrv-anomaly
+hrv-anomaly 0.1.0
+  alerts when a run of nights has HRV far from your own nightly median and spread, with the numbers that made it an alert attached
+  source:     builtin (fitbit_monitor.plugins.builtin.HrvAnomalyPlugin)
+  datasets:   hrv, daily_summary
+  plugin api: 1
+  enabled:    yes
+  options:
+    dataset              str      series to read (default hrv) [default: hrv]
+    field                str      which HRV measure: auto, rmssd, deep_sleep_rmssd or sdnn [default: auto]
+    baseline_nights      int      nights of your own history a bar is built from [default: 28]
+    min_baseline_nights  int      nights before a bar counts as established rather than provisional [default: 10]
+    provisional_min_nights int      fewer nights than this and no bar is built, so nothing is judged [default: 5]
+    min_consecutive_nights int      low nights in a row needed for an alert on its own [default: 2]
+    z_low                float    how many of your own sigmas below your median night counts as low [default: 3.0]
+    z_high               float    the same, above - only used when alert_on_high is true [default: 4.0]
+    deep_dip_z           float    a single night this far down is a finding without a second night [default: 4.5]
+    min_low_delta_ms     float    the bar never sits closer than this to your median, however tight your nights are [default: 6.0]
+    min_spread_ms        float    floor on your own spread, so a near-constant recording cannot make noise a finding [default: 2.5]
+    corroborate          bool     look at resting heart rate and say whether it moved the other way [default: True]
+    resting_hr_dataset   str      where to look for a resting heart rate when corroborating [default: daily_summary]
+    resting_hr_field     str      which resting heart rate field to corroborate with [default: resting_hr]
+    resting_hr_z         float    how far resting heart rate must move, in its own sigmas, to count as corroborating [default: 2.0]
+    alert_on_high        bool     alert when HRV is unusually HIGH too (off: that is not a warning sign) [default: False]
+    provisional_confidence_cap float    confidence ceiling while the baseline is still provisional [default: 0.5]
+    confidence_ceiling   float    confidence ceiling, always below 1 [default: 0.92]
+    min_confidence       float    a finding below this confidence is computed and reported, but does not alert [default: 0.3]
+    warning_confidence   float    confidence at which an alert leaves informational and becomes warning [default: 0.45]
+    critical_confidence  float    confidence at which an alert becomes critical; never reachable on a provisional baseline [default: 0.8]
+    min_window_coverage  float    fraction of nights in the window that must have an HRV value before anything is judged [default: 0.5]
+    max_alerts           int      most significant alerts this one run may raise [default: 5]
+    cooldown             duration two runs of nights this close together are one story, not two alerts [default: 2d]
+```
+
+`fm dev seed` plants heart-rate episodes and no HRV ones, so a seeded corpus is the honest
+way to see what a *quiet* run looks like - and a quiet run is still worth reading, because
+"nothing was unusual" and "this could not tell" must not print the same thing:
+
+```console
+$ fm dev seed --days 60
+$ fm plugins run --name hrv-anomaly --since 30d --no-deliver
+  hrv-anomaly: ok (4 metrics)
+      hrv_anomaly_baseline = rmssd: median 66.9 ms, spread 10.7% (7.2 ms) over 28 nights -> low bar 49.2 ms, high bar 100.6 ms
+      hrv_anomaly_findings = 0 findings
+      hrv_anomaly_alerts = 0 alerts
+      hrv_anomaly_suppressed = 0 candidates
+summary: 1 ok; exit 0
+```
+
+That first line is the run's whole claim: which measure it judged, the median and spread it
+built the bar from, and where the bar ended up. Add `--json` for the same thing as data, and
+look at `hrv_anomaly_suppressed`'s `candidates` for nights that were unusual but not
+notify-worthy - each with the knob that would have changed the answer. On a corpus where one
+night came in 3.6σ low, that candidate is:
+
+```console
+$ fm plugins run --name hrv-anomaly --since 30d --json | python -c \
+    "import json,sys; m=json.load(sys.stdin)['outcomes'][0]['metrics']; print([x for x in m if x['key']=='hrv_anomaly_suppressed'][0]['details']['candidates'][0]['reason'])"
+1 night(s) at 3.6σ down from your own median: a single night needs 4.5σ (deep_dip_z), or 2 in a row (min_consecutive_nights). One low night is a common and usually ordinary thing
+```
+
+What an alert says, on a corpus where three consecutive nights came in about four sigmas
+below the wearer's median:
+
+```
+title    HRV low: 39 ms (2026-05-23 to 2026-05-25, 3 nights)
+
+message  rmssd was 39 ms over 2026-05-23 to 2026-05-25, 3 nights (23 May: 39 ms, 24 May: 39 ms,
+         25 May: 39 ms), against a bar of 45 ms. Your own median over the preceding 28 nights
+         was 70 ms with a spread of 11 ms, so these nights sat 4.0 of those sigmas below it,
+         because 3 nights in a row, at or above min_consecutive_nights = 2. Resting heart
+         rate: resting HR stayed within 1.4σ of its own usual 56 bpm over these nights:
+         uncorroborated, which does not make the HRV reading wrong. This is a heuristic
+         pattern in your own recorded data, not a diagnosis and not medical advice: a
+         wrist-worn consumer sensor estimates one HRV number per night, and it cannot tell
+         you what caused it, what it means, or whether you felt fine the next day.
+         To see every night and what was held back: fm plugins run --name hrv-anomaly
+         --since 30d --json
+
+severity warning    confidence 0.498    dedup_key hrv_low:2026-05-23
+```
+
+Both sides of the comparison are in the sentence, because the bar is the part a reader can
+check: the observed value, the wearer's own median and spread, the bar itself, and which
+rule the nights satisfied. `--json` carries the same numbers as numbers
+(`observed_ms`, `baseline_level_ms`, `baseline_spread_ms`, `threshold_ms`, `z_worst`,
+`because`, `confidence_factors`, `corroboration`).
+
+| metric | what it answers |
+| --- | --- |
+| `hrv_anomaly_baseline` | the bar in words - measure, median, spread, low and high bar, provisional or not |
+| `hrv_anomaly_findings` | runs of nights that crossed a rule, each with its `because` |
+| `hrv_anomaly_alerts` | how many of them alerted, after this plugin's policy |
+| `hrv_anomaly_suppressed` | what did not become an alert, `by_code`: `night_gate` (the detector's own), `low_confidence`, `over_run_cap`, `cooldown` |
+| `hrv_anomaly_declined` | only when too few nights had a value: the reason, and `min_window_coverage` |
+
+```toml
+[plugins.hrv-anomaly]
+enabled = true
+field = "rmssd"                # or "auto": whichever measure your source actually writes
+z_low = 3.0                    # sigmas below your own median before a night counts
+min_consecutive_nights = 2     # a lone night needs deep_dip_z (4.5) instead
+corroborate = true             # resting HR: recorded, never required
+alert_on_high = false          # high HRV is not a warning sign; ask for it if you want it
+min_confidence = 0.3
+cooldown = "2d"                # nightly data: two runs of nights this close are one story
+```
+
+As with `hr-anomaly`, `cooldown` here collapses repeats *inside one scan*; the sink's
+`alerts.cooldown` decides repeats *across runs*. And as with every plugin here, the store it
+is handed is read-only and nothing about the finding leaves the machine except through the
+sinks you configured ([docs/data-policy.md](data-policy.md)).
+
+The source, like the others, is the long version with the reasoning next to each decision:
+[`src/fitbit_monitor/plugins/builtin/hrv_anomaly.py`](../src/fitbit_monitor/plugins/builtin/hrv_anomaly.py).
 
 ---
 

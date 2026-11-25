@@ -12,7 +12,10 @@ believe itself.
 
 The plugin that turns those measurements into alerts - with the plain-language framing, the
 alerting policy and the per-plugin config - is `hr-anomaly`, and it is documented in
-[docs/plugins.md](plugins.md#reference-hr-anomaly-the-built-in-alerting-example).
+[docs/plugins.md](plugins.md#reference-hr-anomaly-the-built-in-alerting-example). Everything
+below is about the intraday engine; [nightly series](#nightly-series-hrv-anomaly) has its
+own detector, for reasons that turn out to be about the shape of the data rather than the
+number of samples.
 
 * The feature layer it reads: `fitbit_monitor.hr` - epoch series, resting and sleep windows,
   the exercise mask, and interval-derived scatter. `fitbit_monitor.hr.windows` and
@@ -134,6 +137,56 @@ observed. Anything held back is returned as a `SuppressedEpisode` with the bar i
 Stretching a run across a hole is a config decision (`merge_gap_minutes`), and so is the hole
 itself: a dip in the rate is *observed* data, and a 60-minute episode that dips back to normal
 for 20 minutes is one episode with a lower mean, not two episodes and a gap.
+
+## Nightly series: `hrv-anomaly`
+
+Heart-rate variability arrives as **one number per night**. That is not "heart rate, fewer
+samples": it is a different shape, and the intraday engine's machinery has nothing to bite
+on. "Sustained for `min_sustained_minutes`" has no referent in a nightly value, a minutes
+floor cannot filter a single measurement, and there is no burst to sustain through a gap.
+Bending the intraday config to cover it would have meant rules whose names lie about what
+they check, so nightly HRV has its own detector:
+[`src/fitbit_monitor/anomaly/hrv.py`](../src/fitbit_monitor/anomaly/hrv.py), surfaced by the
+`hrv-anomaly` plugin
+([`plugins/builtin/hrv_anomaly.py`](../src/fitbit_monitor/plugins/builtin/hrv_anomaly.py)).
+
+The bar is your own median and MAD of `log(value)` over up to `baseline_nights` nights.
+Log space because HRV is multiplicative - 10 ms off a 30 ms night is not the same event as
+10 ms off a 90 ms night - and MAD because a wearer who was ill for a week should not have
+that week pulled their own "normal" towards it. Both thresholds are floors as well as
+sigmas (`min_low_delta_ms`, `min_spread_ms`), so a recording with no scatter in it cannot
+make its own rounding noise look like a finding.
+
+Three rules:
+
+| id | in words | default |
+| --- | --- | --- |
+| `hrv_low` | `min_consecutive_nights` nights at or below `z_low` sigmas under your median, or one night past `deep_dip_z` | 2 nights, 3.0σ, 4.5σ for a lone night |
+| `hrv_high` | the mirror above the median - **off**, because high HRV is not a warning sign and an alert on good news trains you to ignore the ones that are not | `alert_on_high = false` |
+| corroboration | resting HR over the same nights, judged against its own prior nights; recorded, never required | `corroborate = true` at 2.0σ |
+
+Two details are the whole design, and both are about a baseline eating itself:
+
+* **A night that breaks the bar does not join the pool the bar is built from.** The bar means
+  "what have my ordinary nights looked like", and a dip that votes on its own baseline would
+  widen and lower it - a fortnight of low HRV would redefine *low* and then report nothing.
+  So flagged nights are held aside, and a run is judged against the bar standing when the run
+  began, not against one averaged across its own length.
+* **The window is read with `baseline_nights` of lead-in.** Judging May using only May's
+  history spends most of May with no bar at all, which is a silent no; the series is fetched
+  from before the window and only the nights inside it are judged.
+
+Early history is answered with a weaker sentence rather than no sentence: below
+`min_baseline_nights` the bar is built anyway, flagged provisional and capped at
+`provisional_confidence_cap` (and such an alert can never leave informational severity),
+while below `provisional_min_nights` the rules do not run at all and the run says so. A night
+with no value is not a low night and a stored `0 ms` is a broken row, not the strongest
+finding in the month; both are excluded and reported.
+
+The same three confidence factors as the intraday engine - how far past the bar, how mature
+the baseline, how complete the record - with the same ceiling below 1.0. What an alert says,
+and how to run it, is in
+[docs/plugins.md](plugins.md#reference-hrv-anomaly-the-built-in-nightly-series-example).
 
 ## Confidence, and why it is never 1.0
 
